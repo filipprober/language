@@ -181,9 +181,9 @@ public:
     unique_ptr<Expression> right;
 
     BinaryOperation(unique_ptr<Expression> left, TokenType op, unique_ptr<Expression> right) :
-        left(move(left)),
+        left(std::move(left)),
         op(op),
-        right(move(right)) {
+        right(std::move(right)) {
         //
     }
 
@@ -207,7 +207,7 @@ public:
     VariableDeclaration(const string& name, const string& type, unique_ptr<Expression> initializer) :
         name(name),
         type(type),
-        initializer(move(initializer)) {
+        initializer(std::move(initializer)) {
         //
     }
 
@@ -228,7 +228,7 @@ public:
     unique_ptr<Expression> value;
 
     explicit ReturnStatement(unique_ptr<Expression> value) :
-        value(move(value)) {}
+        value(std::move(value)) {}
 
     void print(int indent = 0) const override {
         cout << string(indent, ' ') << "ReturnStatement" << endl;
@@ -243,7 +243,7 @@ public:
     unique_ptr<Expression> expression;
 
     explicit ExpressionStatement(unique_ptr<Expression> expression) :
-        expression(move(expression)) {}
+        expression(std::move(expression)) {}
 
     void print(int indent = 0) const override {
         cout << string(indent, ' ') << "ExpressionStatement" << endl;
@@ -265,6 +265,235 @@ public:
         for (const unique_ptr<Statement>& statement : statements) {
             statement->print(indent + 2);
         }
+    }
+};
+
+// ======================
+// Parser
+// ======================
+
+class Parser {
+public:
+    explicit Parser(vector<Token> tokens) :
+        tokens(std::move(tokens)) {
+        //
+    }
+
+    unique_ptr<Program> parse() {
+        auto program = make_unique<Program>();
+
+        while (!isAtEnd()) {
+            try {
+                // Skip newlines
+                while (match(TokenType::NEWLINE)) {}
+
+                if (isAtEnd()) break;
+
+                auto statement = parseStatement();
+                if (statement) {
+                    program->statements.push_back(std::move(statement));
+                }
+            } catch (const exception& e) {
+                cerr << "Parse error: " << e.what() << endl;
+                synchronize();
+            }
+        }
+
+        return program;
+    }
+
+private:
+    vector<Token> tokens;
+    size_t current;
+
+    bool isAtEnd() const {
+        return peek().type == TokenType::EOF_TOKEN;
+    }
+
+    Token peek() const {
+        return tokens[current];
+    }
+
+    Token previous() const {
+        return tokens[current - 1];
+    }
+
+    Token advance() {
+        if (!isAtEnd()) current++;
+        return previous();
+    }
+
+    bool check(TokenType type) const {
+        if (isAtEnd()) return false;
+        return peek().type == type;
+    }
+
+    bool match(TokenType type) {
+        if (check(type)) {
+            advance();
+            return true;
+        }
+        return false;
+    }
+
+    bool match(initializer_list<TokenType> types) {
+        for (TokenType type : types) {
+            if (check(type)) {
+                advance();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    Token consume(TokenType type, const string& message) {
+        if (check(type)) return advance();
+
+        throw runtime_error(message + " at line " + to_string(peek().line) + ":" + to_string(peek().column));
+    }
+
+    void synchronize() {
+        advance();
+
+        while (!isAtEnd()) {
+            if (previous().type == TokenType::NEWLINE) return;
+
+            switch (peek().type) {
+                case TokenType::CLASS:
+                case TokenType::FN:
+                case TokenType::VAR:
+                case TokenType::IF:
+                case TokenType::WHILE:
+                case TokenType::RETURN:
+                    break;
+                default:
+                    break;
+            }
+
+            advance();
+        }
+    }
+
+    // Statement parsing
+
+    unique_ptr<Statement> parseStatement() {
+        if (match(TokenType::VAR)) {
+            return parseVarDeclaration();
+        }
+
+        if (match(TokenType::RETURN)) {
+            return parseReturnStatement();
+        }
+
+        return parseExpressionStatement();
+    }
+
+    unique_ptr<Statement> parseVarDeclaration() {
+        Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
+
+        string type;
+
+        // Optional
+        if (match(TokenType::COLON)) {
+            Token typeToken = consume(TokenType::IDENTIFIER, "Expected type");
+            type = typeToken.lexeme;
+        }
+
+        unique_ptr<Expression> initializer = nullptr;
+
+        if (match(TokenType::EQUAL)) {
+            initializer = parseExpression();
+        }
+
+        match(TokenType::NEWLINE);
+
+        return make_unique<VariableDeclaration>(name.lexeme, type, std::move(initializer));
+    }
+
+    unique_ptr<Statement> parseReturnStatement() {
+        unique_ptr<Expression> value = nullptr;
+
+        if (!check(TokenType::NEWLINE) && !isAtEnd()) {
+            value = parseExpression();
+        }
+
+        match(TokenType::NEWLINE);
+
+        return make_unique<ReturnStatement>(std::move(value));
+    }
+
+    unique_ptr<Statement> parseExpressionStatement() {
+        auto expression = parseExpression();
+
+        match(TokenType::NEWLINE);
+
+        return make_unique<ExpressionStatement>(std::move(expression));
+    }
+
+    // ==================
+    // Expression Parsing
+    // ==================
+    unique_ptr<Expression> parseExpression() {
+        return parseAddition();
+    }
+
+    unique_ptr<Expression> parseAddition() {
+        auto expression = parseMultiplication();
+
+        while (match({TokenType::PLUS, TokenType::MINUS})) {
+            TokenType op = previous().type;
+            auto right = parseMultiplication();
+            expression = make_unique<BinaryOperation>(std::move(expression), op, std::move(right));
+        }
+
+        return expression;
+    }
+
+    unique_ptr<Expression> parseMultiplication() {
+        auto expression = parsePrimary();
+
+        while (match({TokenType::STAR, TokenType::SLASH, TokenType::PERCENT})) {
+            TokenType op = previous().type;
+            auto right = parsePrimary();
+            expression = make_unique<BinaryOperation>(std::move(expression), op, std::move(right));
+        }
+
+        return expression;
+    }
+
+    unique_ptr<Expression> parsePrimary() {
+        // true/false
+        if (match({TokenType::TRUE})) {
+            return make_unique<BoolLiteral>(true);
+        }
+        if (match({TokenType::FALSE})) {
+            return make_unique<BoolLiteral>(false);
+        }
+
+        // Integer: 42
+        if (match(TokenType::INTEGER_LITERAL)) {
+            int value = stoi(previous().lexeme);
+            return make_unique<IntLiteral>(value);
+        }
+
+        // String: "text"
+        if (match(TokenType::STRING_LITERAL)) {
+            return make_unique<StringLiteral>(previous().lexeme);
+        }
+
+        // Variable: x
+        if (match(TokenType::IDENTIFIER)) {
+            return make_unique<Variable>(previous().lexeme);
+        }
+
+        // Grouped: (5 + 3)
+        if (match(TokenType::LEFT_PAREN)) {
+            auto expression = parseExpression();
+            consume(TokenType::RIGHT_PAREN, "Expected ')' after expression");
+            return expression;
+        }
+
+        throw runtime_error("Expected expression at line" + to_string(peek().line));
     }
 };
 
@@ -536,6 +765,7 @@ void Lexer::scanToken() {
 
         case '\n':
             addToken(TokenType::NEWLINE, "\\n");
+            break;
 
         case '+':
             if (peek() == '=') {
@@ -587,7 +817,7 @@ void Lexer::scanToken() {
             }
             break;
 
-            case '<':
+        case '<':
             if (peek() == '=') {
                 advance();
                 addToken(TokenType::LESS_EQUAL, "<=");
@@ -650,6 +880,18 @@ void Lexer::scanToken() {
                 addToken(TokenType::DOUBLE_COLON, "::");
             } else {
                 addToken(TokenType::COLON, ":");
+            }
+            break;
+
+        case '=':
+            if (peek() == '=') {
+                advance();
+                addToken(TokenType::EQUAL_EQUAL, "==");
+            } else if (peek() == '>') {
+                advance();
+                addToken(TokenType::FAT_ARROW, "=>");
+            } else {
+                addToken(TokenType::EQUAL, "=");
             }
             break;
 
@@ -752,25 +994,7 @@ bool Lexer::isAlphaNumeric(char c) const {
 }
 
 int main(int argc, char* argv[]) {
-    auto left = make_unique<IntLiteral>(5);
-    auto right = make_unique<IntLiteral>(10);
-    auto addition = make_unique<BinaryOperation>(
-        move(left),
-        TokenType::PLUS,
-        move(right)
-    );
-
-    auto varDeclaration = make_unique<VariableDeclaration>(
-        "x",            // name
-        "int",           // type
-        move(addition)
-    );
-
-    Program program;
-    program.statements.push_back(move(varDeclaration));
-
-    cout << "=== AST ===" << endl;
-    program.print();
+    bool debug = true;
 
     if (argc != 2) {
         cerr << "Usage: mylang <file.ml>" << endl;
@@ -791,8 +1015,19 @@ int main(int argc, char* argv[]) {
     Lexer lexer(source);
     auto tokens = lexer.tokenize();
 
-    for (const auto& token : tokens) {
-        cout << token << endl;
+    if (debug) {
+        cout << "=== TOKENS ===" << endl;
+        for (const auto& token : tokens) {
+            cout << token << endl;
+        }
+    }
+
+    Parser parser(tokens);
+    auto program = parser.parse();
+
+    if (debug) {
+        cout << "=== AST ===" << endl;
+        program->print();
     }
 
     return 0;
