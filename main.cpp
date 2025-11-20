@@ -8,6 +8,7 @@
 
 using namespace std;
 
+
 enum class TokenType
 {
     // ======================
@@ -92,6 +93,180 @@ struct Token
 
 string tokenTypeToString(TokenType type);
 ostream& operator<<(ostream& os, const Token& token);
+
+class ASTNode;
+class Expression;
+class Statement;
+
+// ======================
+// AST BASE CLASSES
+// ======================
+class ASTNode
+{
+public:
+    virtual ~ASTNode() {}
+    virtual void print(int indent = 0) const = 0;
+};
+
+class Expression : public ASTNode {
+public:
+    virtual ~Expression() override = default;
+};
+
+class Statement : public ASTNode {
+public:
+    virtual ~Statement() override = default;
+};
+
+// ======================
+// Expressions
+// ======================
+
+class IntLiteral : public Expression {
+public:
+    int value;
+
+    explicit IntLiteral(int value) : value(value) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "IntLiteral(" << value << ")" << endl;
+    }
+};
+
+class StringLiteral : public Expression {
+public:
+    string value;
+
+    explicit StringLiteral(string value) : value(value) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "StringLiteral(" << value << ")" << endl;
+    }
+};
+
+class BoolLiteral : public Expression {
+public:
+    bool value;
+
+    explicit BoolLiteral(bool value) : value(value) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "BoolLiteral(" << (value ? "true" : "false") << ")" << endl;
+    }
+};
+
+class Variable : public Expression {
+public:
+    string name;
+
+    explicit Variable(const string& name) : name(name) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "Variable(" << name << ")" << endl;
+    }
+};
+
+class BinaryOperation : public Expression {
+public:
+    unique_ptr<Expression> left;
+    TokenType op;
+    unique_ptr<Expression> right;
+
+    BinaryOperation(unique_ptr<Expression> left, TokenType op, unique_ptr<Expression> right) :
+        left(move(left)),
+        op(op),
+        right(move(right)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "BinaryOperation(" << tokenTypeToString(op) << ")" << endl;
+        left->print(indent + 2);
+        right->print(indent + 2);
+    }
+};
+
+// ======================
+// Statements
+// ======================
+
+class VariableDeclaration : public Statement {
+public:
+    string name;
+    string type; // Optional
+    unique_ptr<Expression> initializer;
+
+    VariableDeclaration(const string& name, const string& type, unique_ptr<Expression> initializer) :
+        name(name),
+        type(type),
+        initializer(move(initializer)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "VariableDeclaration(name=" << name;
+        if (!type.empty()) {
+            cout << ", type=" << type;
+        }
+        cout << ")" << endl;
+        if (initializer) {
+            initializer->print(indent + 2);
+        }
+    }
+};
+
+class ReturnStatement : public Statement {
+public:
+    unique_ptr<Expression> value;
+
+    explicit ReturnStatement(unique_ptr<Expression> value) :
+        value(move(value)) {}
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "ReturnStatement" << endl;
+        if (value) {
+            value->print(indent + 2);
+        }
+    }
+};
+
+class ExpressionStatement : public Statement {
+public:
+    unique_ptr<Expression> expression;
+
+    explicit ExpressionStatement(unique_ptr<Expression> expression) :
+        expression(move(expression)) {}
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "ExpressionStatement" << endl;
+        expression->print(indent + 2);
+    }
+};
+
+// ======================
+// Program (Root Node)
+// ======================
+
+class Program : public ASTNode {
+public:
+    vector<unique_ptr<Statement>> statements;
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "Program" << endl;
+
+        for (const unique_ptr<Statement>& statement : statements) {
+            statement->print(indent + 2);
+        }
+    }
+};
 
 string tokenTypeToString(TokenType type) {
     switch (type) {
@@ -577,6 +752,26 @@ bool Lexer::isAlphaNumeric(char c) const {
 }
 
 int main(int argc, char* argv[]) {
+    auto left = make_unique<IntLiteral>(5);
+    auto right = make_unique<IntLiteral>(10);
+    auto addition = make_unique<BinaryOperation>(
+        move(left),
+        TokenType::PLUS,
+        move(right)
+    );
+
+    auto varDeclaration = make_unique<VariableDeclaration>(
+        "x",            // name
+        "int",           // type
+        move(addition)
+    );
+
+    Program program;
+    program.statements.push_back(move(varDeclaration));
+
+    cout << "=== AST ===" << endl;
+    program.print();
+
     if (argc != 2) {
         cerr << "Usage: mylang <file.ml>" << endl;
         return 1;
