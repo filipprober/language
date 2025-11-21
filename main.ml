@@ -1,3 +1,9 @@
+fn isEqual(a: int, b: int) -> bool:
+    if a == b:
+        return true
+
+    return false
+
 fn add(a: int, b: int) -> int:
     return a + b
 
@@ -5,6 +11,6 @@ fn greet(name: string):
     print("Hello ")
     print(name)
 
-fn main() -> int:
+fn main():
     greet("Filip")
-    return 0
+    print(isEqual(1, 1))

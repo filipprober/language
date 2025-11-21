@@ -213,6 +213,41 @@ public:
     }
 };
 
+class Assignment : public Expression
+{
+public:
+    string name;
+    unique_ptr<Expression> value;
+
+    Assignment(const string& name, unique_ptr<Expression> value) :
+        name(name),
+        value(std::move(value)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "Assignment(" << name << ")" << endl;
+        value->print(indent + 2);
+    }
+};
+
+class UnaryOperation : public Expression {
+public:
+    TokenType op;
+    unique_ptr<Expression> operand;
+
+    UnaryOperation(TokenType op, unique_ptr<Expression> operand) :
+        op(op),
+        operand(std::move(operand)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "UnaryOperation(" << tokenTypeToString(op) << ")" << endl;
+        operand->print(indent + 2);
+    }
+};
+
 // ======================
 // Statements
 // ======================
@@ -399,6 +434,69 @@ public:
 
         for (const auto& statement: body) {
             statement->print(indent + 4);
+        }
+    }
+};
+
+// ======================
+// Return Path Analysis
+// ======================
+
+class ReturnPathAnalyzer
+{
+public:
+    // Prüft, ob alle Code-Pfade einen Return haben
+    static bool hasReturnOnAllPaths(const vector<unique_ptr<Statement>>& statements) {
+        for (size_t i = 0; i < statements.size(); i++) {
+            const auto& stmt = statements[i];
+
+            if (dynamic_cast<ReturnStatement*>(stmt.get())) {
+                return true;
+            }
+
+            // If-Statement mit else
+            if (auto* ifStmt = dynamic_cast<IfStatement*>(stmt.get())) {
+                // Nur wenn BEIDE Zweige existieren UND beide returnen
+                if (!ifStmt->elseBranch.empty()) {
+                    bool thenReturns = hasReturnOnAllPaths(ifStmt->thenBranch);
+                    bool elseReturns = hasReturnOnAllPaths(ifStmt->elseBranch);
+
+                    if (thenReturns && elseReturns) {
+                        // Beide Zweige returnen -> diese if-else Statement gilt als "returning"
+                        // Aber wir müssen weitermachen, falls danach noch Code kommt
+                        // (sollte eigentlich "unreachable code" sein, aber egal)
+                        return true;
+                    }
+                }
+                // Wenn if kein else hat oder nicht beide returnen, weitermachen
+            }
+            // While-Schleifen garantieren keinen Return (können 0 mal laufen)
+            // Also ignorieren wir sie hier
+        }
+
+        return false;
+    }
+
+    // Prüft eine Funktion auf korrekte Returns
+    static void validateFunction(const FunctionDeclaration* funcDecl) {
+        string funcName = funcDecl->name;
+        string returnType = funcDecl->returnType;
+
+        // main() wird speziell behandelt
+        if (funcName == "main") {
+            return; // main darf implizit 0 zurückgeben
+        }
+
+        // void-Funktionen brauchen keinen expliziten Return
+        if (returnType == "void" || returnType.empty()) {
+            return;
+        }
+
+        if (!hasReturnOnAllPaths(funcDecl->body)) {
+            throw runtime_error(
+                "Function '" + funcName + "' with return type '" + returnType +
+                "' does not return a value on all code paths"
+            );
         }
     }
 };
@@ -594,12 +692,18 @@ private:
         // Parse body (indented block)
         vector<unique_ptr<Statement>> body = parseBlock();
 
-        return make_unique<FunctionDeclaration>(
+        // Erstelle die FunctionDeclaration
+        auto funcDecl = make_unique<FunctionDeclaration>(
             name.lexeme,
             std::move(parameters),
             returnType,
             std::move(body)
         );
+
+        // Validiere Return-Pfade
+        ReturnPathAnalyzer::validateFunction(funcDecl.get());
+
+        return funcDecl;
     }
 
     // Parse If Statement
@@ -721,7 +825,26 @@ private:
     // Expression Parsing
     // ==================
     unique_ptr<Expression> parseExpression() {
-        return parseComparison();
+        return parseAssignment();
+    }
+
+    unique_ptr<Expression> parseAssignment() {
+        auto expr = parseComparison();
+
+        // Check for assignment
+        if (match(TokenType::EQUAL)) {
+            // Left side must be a variable
+            auto* var = dynamic_cast<Variable*>(expr.get());
+            if (!var) {
+                throw runtime_error("Invalid assignment target at line " + to_string(peek().line));
+            }
+
+            string name = var->name;
+            auto value = parseAssignment(); // Right associative
+            return make_unique<Assignment>(name, std::move(value));
+        }
+
+        return expr;
     }
 
     // Comparison: ==, !=, <, >, <=, >=
@@ -754,15 +877,25 @@ private:
     }
 
     unique_ptr<Expression> parseMultiplication() {
-        auto expression = parsePrimary();
+        auto expression = parseUnary();
 
         while (match({TokenType::STAR, TokenType::SLASH, TokenType::PERCENT})) {
             TokenType op = previous().type;
-            auto right = parsePrimary();
+            auto right = parseUnary();
             expression = make_unique<BinaryOperation>(std::move(expression), op, std::move(right));
         }
 
         return expression;
+    }
+
+    unique_ptr<Expression> parseUnary() {
+        if (match({TokenType::MINUS, TokenType::NOT})) {
+            TokenType op = previous().type;
+            auto operand = parseUnary(); // Recursive for multiple unary ops
+            return make_unique<UnaryOperation>(op, std::move(operand));
+        }
+
+        return parsePrimary();
     }
 
     unique_ptr<Expression> parsePrimary() {
@@ -1152,6 +1285,10 @@ void Lexer::scanToken() {
             }
             break;
 
+        case '%':
+            addToken(TokenType::PERCENT, "%");
+            break;
+
         case '/':
             if (peek() == '/') {
                 // Single line comment.
@@ -1484,23 +1621,23 @@ public:
 
 private:
     unique_ptr<LLVMContext> context;
-    unique_ptr<IRBuilder<>> builder;
+    unique_ptr<IRBuilder<> > builder;
     unique_ptr<Module> module;
 
     // Symbol table: variable name -> LLVM Value*
-    unordered_map<string, Value*> namedValues;
+    unordered_map<string, Value *> namedValues;
 
     // Function table: function name -> LLVM Function*
-    unordered_map<string, Function*> functions;
+    unordered_map<string, Function *> functions;
 
     // Current function being compiled
-    Function* currentFunction = nullptr;
+    Function *currentFunction = nullptr;
 
     // ========================================================================
     // Type Conversion
     // ========================================================================
 
-    Type* getType(const string& typeName) {
+    Type *getType(const string &typeName) {
         if (typeName == "int") {
             return Type::getInt32Ty(*context);
         } else if (typeName == "bool") {
@@ -1521,18 +1658,18 @@ private:
     // Statement Generation
     // ========================================================================
 
-    void generateStatement(Statement* stmt) {
-        if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt)) {
+    void generateStatement(Statement *stmt) {
+        if (auto *funcDecl = dynamic_cast<FunctionDeclaration *>(stmt)) {
             generateFunction(funcDecl);
-        } else if (auto* varDecl = dynamic_cast<VariableDeclaration*>(stmt)) {
+        } else if (auto *varDecl = dynamic_cast<VariableDeclaration *>(stmt)) {
             generateVariableDeclaration(varDecl);
-        } else if (auto* returnStmt = dynamic_cast<ReturnStatement*>(stmt)) {
+        } else if (auto *returnStmt = dynamic_cast<ReturnStatement *>(stmt)) {
             generateReturn(returnStmt);
-        } else if (auto* ifStmt = dynamic_cast<IfStatement*>(stmt)) {
+        } else if (auto *ifStmt = dynamic_cast<IfStatement *>(stmt)) {
             generateIf(ifStmt);
-        } else if (auto* whileStmt = dynamic_cast<WhileStatement*>(stmt)) {
+        } else if (auto *whileStmt = dynamic_cast<WhileStatement *>(stmt)) {
             generateWhile(whileStmt);
-        } else if (auto* exprStmt = dynamic_cast<ExpressionStatement*>(stmt)) {
+        } else if (auto *exprStmt = dynamic_cast<ExpressionStatement *>(stmt)) {
             generateExpression(exprStmt->expression.get());
         }
     }
@@ -1541,24 +1678,24 @@ private:
     // Function Generation
     // ========================================================================
 
-    void generateFunction(FunctionDeclaration* funcDecl) {
+    void generateFunction(FunctionDeclaration *funcDecl) {
         // Build parameter types
-        vector<Type*> paramTypes;
-        for (const auto& param : funcDecl->parameters) {
+        vector<Type *> paramTypes;
+        for (const auto &param: funcDecl->parameters) {
             paramTypes.push_back(getType(param.type));
         }
 
         // Build function type
-        Type* returnType;
+        Type *returnType;
         if (funcDecl->name == "main") {
             returnType = Type::getInt32Ty(*context);
         } else {
             returnType = getType(funcDecl->returnType);
         }
-        FunctionType* funcType = FunctionType::get(returnType, paramTypes, false);
+        FunctionType *funcType = FunctionType::get(returnType, paramTypes, false);
 
         // Create function
-        Function* function = Function::Create(
+        Function *function = Function::Create(
             funcType,
             Function::ExternalLinkage,
             funcDecl->name,
@@ -1569,33 +1706,43 @@ private:
         functions[funcDecl->name] = function;
         currentFunction = function;
 
-        // Set parameter names and add to symbol table
-        size_t idx = 0;
-        for (auto& arg : function->args()) {
-            arg.setName(funcDecl->parameters[idx].name);
-            namedValues[funcDecl->parameters[idx].name] = &arg;
-            idx++;
-        }
-
         // Create entry block
-        BasicBlock* entryBlock = BasicBlock::Create(*context, "entry", function);
+        BasicBlock *entryBlock = BasicBlock::Create(*context, "entry", function);
         builder->SetInsertPoint(entryBlock);
 
+        // Create allocas for parameters and store initial values
+        for (auto &arg: function->args()) {
+            // Set parameter name
+            arg.setName(funcDecl->parameters[arg.getArgNo()].name);
+
+            // Create alloca for this parameter
+            AllocaInst *alloca = builder->CreateAlloca(
+                arg.getType(),
+                nullptr,
+                arg.getName()
+            );
+
+            // Store the parameter value
+            builder->CreateStore(&arg, alloca);
+
+            // Add to symbol table
+            namedValues[std::string(arg.getName())] = alloca;
+        }
+
         // Generate function body
-        for (const auto& stmt : funcDecl->body) {
+        for (const auto &stmt: funcDecl->body) {
             generateStatement(stmt.get());
         }
 
         // Add default return if missing
-        if (!builder->GetInsertBlock()->getTerminator()) {
+        BasicBlock *currentBlock = builder->GetInsertBlock();
+        if (currentBlock && !currentBlock->getTerminator()) {
             if (funcDecl->name == "main") {
                 builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
             } else if (returnType->isVoidTy()) {
                 builder->CreateRetVoid();
-            } else if (returnType->isIntegerTy()) {
-                builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
             } else {
-                builder->CreateRetVoid();
+                builder->CreateUnreachable();
             }
         }
 
@@ -1607,25 +1754,32 @@ private:
         currentFunction = nullptr;
     }
 
-    // ========================================================================
-    // Variable Declaration
-    // ========================================================================
-
     void generateVariableDeclaration(VariableDeclaration* varDecl) {
-        Value* initValue = nullptr;
+        // Create alloca instruction in entry block
+        Function* function = builder->GetInsertBlock()->getParent();
+        IRBuilder<> tmpBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
 
+        Type* type = getType(varDecl->type.empty() ? "int" : varDecl->type);
+        AllocaInst* alloca = tmpBuilder.CreateAlloca(type, nullptr, varDecl->name);
+
+        Value* initValue = nullptr;
         if (varDecl->initializer) {
             initValue = generateExpression(varDecl->initializer.get());
         } else {
             // Default value
-            Type* type = getType(varDecl->type);
             if (type->isIntegerTy()) {
                 initValue = ConstantInt::get(*context, APInt(32, 0));
+            } else if (type->isIntegerTy(1)) {
+                initValue = ConstantInt::get(*context, APInt(1, 0));
             }
         }
 
-        // For now, store in symbol table (later: proper alloca)
-        namedValues[varDecl->name] = initValue;
+        if (initValue) {
+            builder->CreateStore(initValue, alloca);
+        }
+
+        // Store the alloca in symbol table
+        namedValues[varDecl->name] = alloca;
     }
 
     // ========================================================================
@@ -1645,8 +1799,8 @@ private:
     // If Statement
     // ========================================================================
 
-    void generateIf(IfStatement* ifStmt) {
-        Value* condition = generateExpression(ifStmt->condition.get());
+    void generateIf(IfStatement *ifStmt) {
+        Value *condition = generateExpression(ifStmt->condition.get());
 
         // Convert to boolean if needed
         if (!condition->getType()->isIntegerTy(1)) {
@@ -1657,43 +1811,80 @@ private:
             );
         }
 
-        Function* function = builder->GetInsertBlock()->getParent();
+        Function *function = builder->GetInsertBlock()->getParent();
 
         // Create blocks
-        BasicBlock* thenBB = BasicBlock::Create(*context, "then", function);
-        BasicBlock* elseBB = BasicBlock::Create(*context, "else");
-        BasicBlock* mergeBB = BasicBlock::Create(*context, "ifcont");
+        BasicBlock *thenBB = BasicBlock::Create(*context, "then", function);
+        BasicBlock *elseBB = nullptr;
+        BasicBlock *mergeBB = nullptr;
+
+        // Nur merge-Block erstellen wenn nötig
+        bool needsMerge = true;
 
         if (!ifStmt->elseBranch.empty()) {
+            elseBB = BasicBlock::Create(*context, "else");
             builder->CreateCondBr(condition, thenBB, elseBB);
         } else {
+            mergeBB = BasicBlock::Create(*context, "ifcont");
             builder->CreateCondBr(condition, thenBB, mergeBB);
+            needsMerge = true; // Wir haben schon einen merge-Block
         }
 
         // Then block
         builder->SetInsertPoint(thenBB);
-        for (const auto& stmt : ifStmt->thenBranch) {
+        for (const auto &stmt: ifStmt->thenBranch) {
             generateStatement(stmt.get());
         }
-        if (!builder->GetInsertBlock()->getTerminator()) {
-            builder->CreateBr(mergeBB);
-        }
+        bool thenHasTerminator = builder->GetInsertBlock()->getTerminator() != nullptr;
 
         // Else block
+        bool elseHasTerminator = false;
         if (!ifStmt->elseBranch.empty()) {
             function->insert(function->end(), elseBB);
             builder->SetInsertPoint(elseBB);
-            for (const auto& stmt : ifStmt->elseBranch) {
+            for (const auto &stmt: ifStmt->elseBranch) {
                 generateStatement(stmt.get());
             }
-            if (!builder->GetInsertBlock()->getTerminator()) {
-                builder->CreateBr(mergeBB);
-            }
+            elseHasTerminator = builder->GetInsertBlock()->getTerminator() != nullptr;
         }
 
-        // Merge block
-        function->insert(function->end(), mergeBB);
-        builder->SetInsertPoint(mergeBB);
+        // Nur merge-Block erstellen wenn mindestens ein Zweig NICHT terminiert
+        if (!ifStmt->elseBranch.empty()) {
+            if (!thenHasTerminator || !elseHasTerminator) {
+                if (!mergeBB) {
+                    mergeBB = BasicBlock::Create(*context, "ifcont");
+                }
+
+                // Then zum merge springen lassen
+                if (!thenHasTerminator) {
+                    builder->SetInsertPoint(thenBB);
+                    builder->CreateBr(mergeBB);
+                }
+
+                // Else zum merge springen lassen
+                if (!elseHasTerminator) {
+                    builder->SetInsertPoint(elseBB);
+                    builder->CreateBr(mergeBB);
+                }
+
+                function->insert(function->end(), mergeBB);
+                builder->SetInsertPoint(mergeBB);
+            } else {
+                // Beide Zweige haben Terminator -> kein merge nötig
+                // Setze Insert Point auf einen neuen unreachable Block
+                BasicBlock *unreachableBB = BasicBlock::Create(*context, "unreachable", function);
+                builder->SetInsertPoint(unreachableBB);
+                builder->CreateUnreachable();
+            }
+        } else {
+            // Nur then-Branch, merge für den Fall dass condition false ist
+            if (!thenHasTerminator) {
+                builder->SetInsertPoint(thenBB);
+                builder->CreateBr(mergeBB);
+            }
+            function->insert(function->end(), mergeBB);
+            builder->SetInsertPoint(mergeBB);
+        }
     }
 
     // ========================================================================
@@ -1752,18 +1943,43 @@ private:
             return builder->CreateGlobalStringPtr(strLit->value);
         }
         else if (auto* var = dynamic_cast<Variable*>(expr)) {
-            Value* val = namedValues[var->name];
-            if (!val) {
+            Value* varPtr = namedValues[var->name];
+            if (!varPtr) {
                 errs() << "Unknown variable: " << var->name << "\n";
                 return nullptr;
             }
-            return val;
+
+            // Load the value from memory
+            // In LLVM 21+ müssen wir den Typ aus der AllocaInst holen
+            if (auto* allocaInst = dyn_cast<AllocaInst>(varPtr)) {
+                return builder->CreateLoad(
+                    allocaInst->getAllocatedType(),
+                    varPtr,
+                    var->name.c_str()
+                );
+            } else {
+                // Falls es ein Argument ist (sollte nicht vorkommen nach unseren Änderungen)
+                return varPtr;
+            }
+        }
+        else if (auto* unaryOp = dynamic_cast<UnaryOperation*>(expr)) {
+            return generateUnaryOp(unaryOp);
         }
         else if (auto* binOp = dynamic_cast<BinaryOperation*>(expr)) {
             return generateBinaryOp(binOp);
         }
         else if (auto* call = dynamic_cast<FunctionCall*>(expr)) {
             return generateFunctionCall(call);
+        }
+        else if (auto* assign = dynamic_cast<Assignment*>(expr)) {
+            Value* val = generateExpression(assign->value.get());
+            Value* varPtr = namedValues[assign->name];
+            if (!varPtr) {
+                errs() << "Unknown variable: " << assign->name << "\n";
+                return nullptr;
+            }
+            builder->CreateStore(val, varPtr);
+            return val;
         }
 
         return nullptr;
@@ -1804,6 +2020,29 @@ private:
         }
     }
 
+    Value* generateUnaryOp(UnaryOperation* unaryOp) {
+        Value* operand = generateExpression(unaryOp->operand.get());
+        if (!operand) return nullptr;
+
+        switch (unaryOp->op) {
+            case TokenType::MINUS:
+                // Negate: 0 - operand
+                if (operand->getType()->isIntegerTy()) {
+                    return builder->CreateNeg(operand, "negtmp");
+                } else if (operand->getType()->isDoubleTy()) {
+                    return builder->CreateFNeg(operand, "negtmp");
+                }
+                break;
+            case TokenType::NOT:
+                // Logical NOT
+                return builder->CreateNot(operand, "nottmp");
+            default:
+                errs() << "Unknown unary operator\n";
+                return nullptr;
+        }
+        return nullptr;
+    }
+
     Value* generatePrint(FunctionCall* call) {
         Function* printfFunc = module->getFunction("printf");
 
@@ -1826,12 +2065,21 @@ private:
             printfArgs.push_back(formatStr);
             printfArgs.push_back(arg);
         } else if (arg->getType()->isIntegerTy(1)) {
-            // Boolean - convert to string
-            Value* trueStr = builder->CreateGlobalStringPtr("true\n");
-            Value* falseStr = builder->CreateGlobalStringPtr("false\n");
+            // Boolean - convert to i32 first for comparison
+            Value* boolAsInt = builder->CreateZExt(arg, Type::getInt32Ty(*context), "booltoint");
+            Value* trueStr = builder->CreateGlobalStringPtr("true");
+            Value* falseStr = builder->CreateGlobalStringPtr("false");
 
-            formatStr = builder->CreateSelect(arg, trueStr, falseStr);
+            // Compare with 0
+            Value* isTrue = builder->CreateICmpNE(
+                boolAsInt,
+                ConstantInt::get(*context, APInt(32, 0))
+            );
+            Value* selectedStr = builder->CreateSelect(isTrue, trueStr, falseStr);
+
+            formatStr = builder->CreateGlobalStringPtr("%s\n");
             printfArgs.push_back(formatStr);
+            printfArgs.push_back(selectedStr);
         } else if (arg->getType()->isDoubleTy()) {
             // Float
             formatStr = builder->CreateGlobalStringPtr("%f\n");
