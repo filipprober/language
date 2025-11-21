@@ -687,7 +687,9 @@ private:
         }
 
         consume(TokenType::COLON, "Expected ':' after function signature");
-        match(TokenType::NEWLINE);
+
+        // Skip all newlines
+        while (match(TokenType::NEWLINE)) {}
 
         // Parse body (indented block)
         vector<unique_ptr<Statement>> body = parseBlock();
@@ -1489,7 +1491,6 @@ void Lexer::handleIndentation() {
 
     // Skip empty lines and comments
     if (peek() == '\n' || peek() == '#') {
-        atLineStart = false;  // Wichtig!
         return;
     }
 
