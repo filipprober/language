@@ -252,6 +252,139 @@ public:
 };
 
 // ======================
+// Function Related Nodes
+// ======================
+
+// Function Parameter: (name: type)
+class Parameter {
+public:
+    string name;
+    string type;
+
+    Parameter(const string& name, const string& type) :
+        name(name),
+        type(type) {
+        //
+    }
+};
+
+class FunctionDeclaration : public Statement {
+public:
+    string name;
+    vector<Parameter> parameters;
+    string returnType;
+    vector<unique_ptr<Statement>> body;
+
+    FunctionDeclaration(const string& name, vector<Parameter> parameters, const string& returnType, vector<unique_ptr<Statement>> body) :
+        name(name),
+        parameters(std::move(parameters)),
+        returnType(returnType),
+        body(std::move(body)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "FunctionDeclaration(name=" << name;
+
+        cout << ", params=[";
+        for (size_t i = 0; i < parameters.size(); i++) {
+            if (i > 0) cout << ", ";
+            cout << parameters[i].name << ": " << parameters[i].type;
+        }
+        cout << "]";
+
+        if (!returnType.empty()) {
+            cout << ", returns=" << returnType;
+        }
+        cout << ")" << endl;
+
+        for (const auto& statement : body) {
+            statement->print(indent + 2);
+        }
+    }
+};
+
+// Function Call: add(5, 3);
+class FunctionCall : public Expression {
+public:
+    string name;
+    vector<unique_ptr<Expression>> arguments;
+
+    FunctionCall(const string& name, vector<unique_ptr<Expression>> arguments) :
+        name(name),
+        arguments(std::move(arguments)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "FunctionCall(" << name << ")" << endl;
+        for (const auto& argument : arguments) {
+            argument->print(indent + 2);
+        }
+    }
+};
+
+// If Statement: if x > 5:
+class IfStatement : public Statement {
+public:
+    unique_ptr<Expression> condition;
+    vector<unique_ptr<Statement>> thenBranch;
+    vector<unique_ptr<Statement>> elseBranch; // Optional
+
+    IfStatement(
+        unique_ptr<Expression> condition,
+        vector<unique_ptr<Statement> > thenBranch,
+        vector<unique_ptr<Statement> > elseBranch
+    ) : condition(std::move(condition)),
+        thenBranch(std::move(thenBranch)),
+        elseBranch(std::move(elseBranch)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "IfStatement" << endl;
+        cout << string(indent + 2, ' ') << "Condition:" << endl;
+        condition->print(indent + 4);
+        cout << string(indent + 2, ' ') << "Then:" << endl;
+
+        for (const auto& statement: thenBranch) {
+            statement->print(indent + 4);
+        }
+
+        if (!elseBranch.empty()) {
+            cout << string(indent + 2, ' ') << "Else:" << endl;
+            for (const auto& statement: elseBranch) {
+                statement->print(indent + 4);
+            }
+        }
+    }
+};
+
+// While Statement: while x < 10:
+class WhileStatement : public Statement {
+public:
+    unique_ptr<Expression> condition;
+    vector<unique_ptr<Statement>> body;
+
+    WhileStatement(
+        unique_ptr<Expression> condition,
+        vector<unique_ptr<Statement>> body
+    ) : condition(std::move(condition)),
+        body(std::move(body)) {}
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "WhileStatement" << endl;
+        cout << string(indent + 2, ' ') << "Condition:" << endl;
+        condition->print(indent + 4);
+        cout << string(indent + 2, ' ') << "Body:" << endl;
+
+        for (const auto& statement: body) {
+            statement->print(indent + 4);
+        }
+    }
+};
+
+// ======================
 // Program (Root Node)
 // ======================
 
@@ -284,8 +417,8 @@ public:
 
         while (!isAtEnd()) {
             try {
-                // Skip newlines
-                while (match(TokenType::NEWLINE)) {}
+                // Skip newlines and indents at top level
+                while (match({TokenType::NEWLINE, TokenType::INDENT, TokenType::DEDENT})) {}
 
                 if (isAtEnd()) break;
 
@@ -377,15 +510,137 @@ private:
     // Statement parsing
 
     unique_ptr<Statement> parseStatement() {
+        // Function: fn add(a: int, b: int) -> int:
+        if (match(TokenType::FN)) {
+            return parseFunctionDeclaration();
+        }
+
+        // Variable: var x = 5
         if (match(TokenType::VAR)) {
             return parseVarDeclaration();
         }
 
+        // If: if x > 5:
+        if (match(TokenType::IF)) {
+            return parseIfStatement();
+        }
+
+        // While: while x < 10:
+        if (match(TokenType::WHILE)) {
+            return parseWhileStatement();
+        }
+
+        // Return: return 42
         if (match(TokenType::RETURN)) {
             return parseReturnStatement();
         }
 
+        // Expression statement
         return parseExpressionStatement();
+    }
+
+    // Parse Function Declaration
+    unique_ptr<Statement> parseFunctionDeclaration() {
+        Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+
+        consume(TokenType::LEFT_PAREN, "Expected '(' after function name");
+
+        // Parse parameters
+        vector<Parameter> parameters;
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do {
+                Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+                consume(TokenType::COLON, "Expected ':' after parameter name");
+
+                Token paramType = advance();
+                parameters.emplace_back(paramName.lexeme, paramType.lexeme);
+            } while (match(TokenType::COMMA));
+        }
+
+        consume(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
+
+        // Parse return type (optional)
+        string returnType;
+        if (match(TokenType::ARROW)) {
+            Token typeToken = advance();
+            returnType = typeToken.lexeme;
+        }
+
+        consume(TokenType::COLON, "Expected ':' after function signature");
+        match(TokenType::NEWLINE);
+
+        // Parse body (indented block)
+        vector<unique_ptr<Statement>> body = parseBlock();
+
+        return make_unique<FunctionDeclaration>(
+            name.lexeme,
+            std::move(parameters),
+            returnType,
+            std::move(body)
+        );
+    }
+
+    // Parse If Statement
+    unique_ptr<Statement> parseIfStatement() {
+        auto condition = parseExpression();
+        consume(TokenType::COLON, "Expected ':' after if condition");
+        match(TokenType::NEWLINE);
+
+        vector<unique_ptr<Statement> > thenBranch = parseBlock();
+        vector<unique_ptr<Statement> > elseBranch;
+
+        if (match(TokenType::ELSE)) {
+            consume(TokenType::COLON, "Expected ':' after else");
+            match(TokenType::NEWLINE);
+            elseBranch = parseBlock();
+        }
+
+        return make_unique<IfStatement>(
+            std::move(condition),
+            std::move(thenBranch),
+            std::move(elseBranch)
+        );
+    }
+
+    // Parse While Statement
+    unique_ptr<Statement> parseWhileStatement() {
+        auto condition = parseExpression();
+        consume(TokenType::COLON, "Expected ':' after while condition");
+        match(TokenType::NEWLINE);
+
+        vector<unique_ptr<Statement> > body = parseBlock();
+
+        return make_unique<WhileStatement>(
+            std::move(condition),
+            std::move(body)
+        );
+    }
+
+    vector<unique_ptr<Statement>> parseBlock() {
+        vector<unique_ptr<Statement>> statements;
+
+        // Expect INDENT at start of block
+        consume(TokenType::INDENT, "Expected indentation after ':'");
+
+        // Skip newlines
+        while (match(TokenType::NEWLINE)) {}
+
+        // Parse statements until DEDENT
+        while (!check(TokenType::DEDENT) && !isAtEnd()) {
+            // Skip empty lines
+            while (match(TokenType::NEWLINE)) {}
+
+            if (check(TokenType::DEDENT) || isAtEnd()) {
+                break;
+            }
+
+            statements.push_back(parseStatement());
+        }
+
+        // Expect DEDENT at end of block
+        consume(TokenType::DEDENT, "Expected dedent to end block");
+
+        return statements;
     }
 
     unique_ptr<Statement> parseVarDeclaration() {
@@ -393,9 +648,9 @@ private:
 
         string type;
 
-        // Optional
+        // Optional type annotation
         if (match(TokenType::COLON)) {
-            Token typeToken = consume(TokenType::IDENTIFIER, "Expected type");
+            Token typeToken = advance();
             type = typeToken.lexeme;
         }
 
@@ -434,7 +689,24 @@ private:
     // Expression Parsing
     // ==================
     unique_ptr<Expression> parseExpression() {
-        return parseAddition();
+        return parseComparison();
+    }
+
+    // Comparison: ==, !=, <, >, <=, >=
+    unique_ptr<Expression> parseComparison() {
+        auto expr = parseAddition();
+
+        while (match({
+            TokenType::EQUAL_EQUAL, TokenType::BANG_EQUAL,
+            TokenType::LESS, TokenType::LESS_EQUAL,
+            TokenType::GREATER, TokenType::GREATER_EQUAL
+        })) {
+            TokenType op = previous().type;
+            auto right = parseAddition();
+            expr = make_unique<BinaryOperation>(std::move(expr), op, std::move(right));
+        }
+
+        return expr;
     }
 
     unique_ptr<Expression> parseAddition() {
@@ -463,10 +735,10 @@ private:
 
     unique_ptr<Expression> parsePrimary() {
         // true/false
-        if (match({TokenType::TRUE})) {
+        if (match(TokenType::TRUE)) {
             return make_unique<BoolLiteral>(true);
         }
-        if (match({TokenType::FALSE})) {
+        if (match(TokenType::FALSE)) {
             return make_unique<BoolLiteral>(false);
         }
 
@@ -481,9 +753,27 @@ private:
             return make_unique<StringLiteral>(previous().lexeme);
         }
 
-        // Variable: x
+        // Variable oder Function Call
         if (match(TokenType::IDENTIFIER)) {
-            return make_unique<Variable>(previous().lexeme);
+            string name = previous().lexeme;
+
+            // Function Call: add(5, 3)
+            if (match(TokenType::LEFT_PAREN)) {
+                vector<unique_ptr<Expression>> arguments;
+
+                // Parse arguments
+                if (!check(TokenType::RIGHT_PAREN)) {
+                    do {
+                        arguments.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+
+                consume(TokenType::RIGHT_PAREN, "Expected ')' after arguments");
+                return make_unique<FunctionCall>(name, std::move(arguments));
+            }
+
+            // Just a variable
+            return make_unique<Variable>(name);
         }
 
         // Grouped: (5 + 3)
@@ -649,6 +939,10 @@ private:
     int column = 1;
     vector<Token> tokens;
 
+    vector<int> indentStack = {0};
+    bool atLineStart = true;
+    int currentIndent = 0;
+
     static std::unordered_map<string, TokenType> keywords;
 
     bool isAtEnd() const;
@@ -663,6 +957,7 @@ private:
     void scanString();
     void scanIdentifier();
     void scanComment();
+    void handleIndentation();
 
     bool isDigit(char c) const;
     bool isAlpha(char c) const;
@@ -716,7 +1011,17 @@ Lexer::Lexer(const string& source) : source(source) {}
 
 vector<Token> Lexer::tokenize() {
     while (!isAtEnd()) {
+        // Handle indentation at line start
+        if (atLineStart && peek() != '\n') {
+            handleIndentation();
+        }
+
         scanToken();
+    }
+
+    while (indentStack.size() > 1) {
+        indentStack.pop_back();
+        addToken(TokenType::DEDENT, "DEDENT");
     }
 
     addToken(TokenType::EOF_TOKEN, "");
@@ -760,11 +1065,20 @@ void Lexer::scanToken() {
         case ' ':
         case '\r':
         case '\t':
-            // Skip whitespace.
+            // Skip whitespace only if not at line start
+            if (!atLineStart) {
+                // Just skip
+            } else {
+                // Don't skip - handleIndentation() will process it
+                current--;  // Go back
+                column--;
+                handleIndentation();
+            }
             break;
 
         case '\n':
             addToken(TokenType::NEWLINE, "\\n");
+            atLineStart = true;
             break;
 
         case '+':
@@ -980,6 +1294,52 @@ void Lexer::scanComment() {
         advance();
     }
 }
+
+void Lexer::handleIndentation() {
+    if (!atLineStart) return;
+
+    int spaces = 0;
+
+    // Count leading spaces/tabs
+    while (peek() == ' ' || peek() == '\t') {
+        if (peek() == '\t') {
+            spaces += 4;  // Tab = 4 spaces
+        } else {
+            spaces += 1;
+        }
+        advance();
+    }
+
+    // Skip empty lines and comments
+    if (peek() == '\n' || peek() == '#') {
+        return;
+    }
+
+    currentIndent = spaces;
+    atLineStart = false;
+
+    // Compare with previous indent level
+    int previousIndent = indentStack.back();
+
+    if (currentIndent > previousIndent) {
+        // INDENT: Deeper nesting
+        indentStack.push_back(currentIndent);
+        addToken(TokenType::INDENT, "INDENT");
+    } else if (currentIndent < previousIndent) {
+        // DEDENT: Coming back out
+        while (!indentStack.empty() && indentStack.back() > currentIndent) {
+            indentStack.pop_back();
+            addToken(TokenType::DEDENT, "DEDENT");
+        }
+
+        // Check for indentation error
+        if (indentStack.empty() || indentStack.back() != currentIndent) {
+            throw runtime_error("Indentation error at line " + to_string(line));
+        }
+    }
+    // If currentIndent == previousIndent: same level, do nothing
+}
+
 
 bool Lexer::isDigit(char c) const {
     return c >= '0' && c <= '9';
