@@ -5,8 +5,27 @@
 #include <unordered_map>
 #include <fstream>
 #include <sstream>
+#include <memory>
+
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/IR/LegacyPassManager.h"
 
 using namespace std;
+using namespace llvm;
 
 
 enum class TokenType
@@ -408,7 +427,9 @@ public:
 class Parser {
 public:
     explicit Parser(vector<Token> tokens) :
-        tokens(std::move(tokens)) {
+        tokens(std::move(tokens)),
+        current(0)
+    {
         //
     }
 
@@ -416,19 +437,15 @@ public:
         auto program = make_unique<Program>();
 
         while (!isAtEnd()) {
-            try {
-                // Skip newlines and indents at top level
-                while (match({TokenType::NEWLINE, TokenType::INDENT, TokenType::DEDENT})) {}
+            // Skip newlines and DEDENT tokens at top level
+            while (match({TokenType::NEWLINE})) {}
+            while (match({TokenType::DEDENT})) {}
 
-                if (isAtEnd()) break;
+            if (isAtEnd()) break;
 
-                auto statement = parseStatement();
-                if (statement) {
-                    program->statements.push_back(std::move(statement));
-                }
-            } catch (const exception& e) {
-                cerr << "Parse error: " << e.what() << endl;
-                synchronize();
+            auto statement = parseStatement();
+            if (statement) {
+                program->statements.push_back(std::move(statement));
             }
         }
 
@@ -552,7 +569,10 @@ private:
                 Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
                 consume(TokenType::COLON, "Expected ':' after parameter name");
 
-                Token paramType = advance();
+                if (!match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
+                    throw runtime_error("Expected type after ':' at line " + to_string(peek().line));
+                }
+                Token paramType = previous();
                 parameters.emplace_back(paramName.lexeme, paramType.lexeme);
             } while (match(TokenType::COMMA));
         }
@@ -560,10 +580,12 @@ private:
         consume(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
 
         // Parse return type (optional)
-        string returnType;
+        string returnType = "void";
         if (match(TokenType::ARROW)) {
-            Token typeToken = advance();
-            returnType = typeToken.lexeme;
+            if (!match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
+                throw runtime_error("Expected return type after '->'");
+            }
+            returnType = previous().lexeme;
         }
 
         consume(TokenType::COLON, "Expected ':' after function signature");
@@ -622,23 +644,33 @@ private:
         // Expect INDENT at start of block
         consume(TokenType::INDENT, "Expected indentation after ':'");
 
-        // Skip newlines
+        // Skip initial newlines
         while (match(TokenType::NEWLINE)) {}
 
         // Parse statements until DEDENT
-        while (!check(TokenType::DEDENT) && !isAtEnd()) {
-            // Skip empty lines
-            while (match(TokenType::NEWLINE)) {}
-
-            if (check(TokenType::DEDENT) || isAtEnd()) {
+        while (!isAtEnd()) {
+            // Check for DEDENT - das ist das Ende des Blocks
+            if (check(TokenType::DEDENT)) {
+                advance(); // consume the DEDENT
                 break;
             }
 
+            // Skip empty lines
+            while (match(TokenType::NEWLINE)) {}
+
+            // Check again after skipping newlines
+            if (check(TokenType::DEDENT)) {
+                advance();
+                break;
+            }
+
+            if (isAtEnd()) {
+                break;
+            }
+
+            // Parse the statement
             statements.push_back(parseStatement());
         }
-
-        // Expect DEDENT at end of block
-        consume(TokenType::DEDENT, "Expected dedent to end block");
 
         return statements;
     }
@@ -750,7 +782,7 @@ private:
 
         // String: "text"
         if (match(TokenType::STRING_LITERAL)) {
-            return make_unique<StringLiteral>(previous().lexeme);
+            return make_unique<::StringLiteral>(previous().lexeme);
         }
 
         // Variable oder Function Call
@@ -783,7 +815,7 @@ private:
             return expression;
         }
 
-        throw runtime_error("Expected expression at line" + to_string(peek().line));
+        throw runtime_error("Expected expression at line " + to_string(peek().line));
     }
 };
 
@@ -1019,6 +1051,12 @@ vector<Token> Lexer::tokenize() {
         scanToken();
     }
 
+    // WICHTIG: Füge ein finales NEWLINE hinzu, falls die letzte Zeile keins hat
+    if (!tokens.empty() && tokens.back().type != TokenType::NEWLINE) {
+        addToken(TokenType::NEWLINE, "\\n");
+    }
+
+    // Jetzt die DEDENTs hinzufügen
     while (indentStack.size() > 1) {
         indentStack.pop_back();
         addToken(TokenType::DEDENT, "DEDENT");
@@ -1079,6 +1117,7 @@ void Lexer::scanToken() {
         case '\n':
             addToken(TokenType::NEWLINE, "\\n");
             atLineStart = true;
+            currentIndent = 0;
             break;
 
         case '+':
@@ -1312,6 +1351,7 @@ void Lexer::handleIndentation() {
 
     // Skip empty lines and comments
     if (peek() == '\n' || peek() == '#') {
+        atLineStart = false;  // Wichtig!
         return;
     }
 
@@ -1337,9 +1377,7 @@ void Lexer::handleIndentation() {
             throw runtime_error("Indentation error at line " + to_string(line));
         }
     }
-    // If currentIndent == previousIndent: same level, do nothing
 }
-
 
 bool Lexer::isDigit(char c) const {
     return c >= '0' && c <= '9';
@@ -1353,17 +1391,521 @@ bool Lexer::isAlphaNumeric(char c) const {
     return isAlpha(c) || isDigit(c);
 }
 
-int main(int argc, char* argv[]) {
-    bool debug = true;
+// ======================
+// LLVM Code Generator
+// ======================
 
-    if (argc != 2) {
-        cerr << "Usage: mylang <file.ml>" << endl;
+// ======================
+// LLVM Code Generator
+// ======================
+
+class CodeGenerator {
+public:
+    CodeGenerator()
+        : context(make_unique<LLVMContext>()),
+          builder(make_unique<IRBuilder<>>(*context)),
+          module(make_unique<Module>("mylang", *context)) {
+        // Initialize LLVM
+        InitializeNativeTarget();
+        InitializeNativeTargetAsmPrinter();
+        InitializeNativeTargetAsmParser();
+    }
+
+    void declarePrintf() {
+        // Deklariere printf: int printf(char*, ...)
+        FunctionType* printfType = FunctionType::get(
+            Type::getInt32Ty(*context),
+            {PointerType::get(Type::getInt8Ty(*context), 0)},
+            true  // varargs
+        );
+
+        Function::Create(
+            printfType,
+            Function::ExternalLinkage,
+            "printf",
+            module.get()
+        );
+    }
+
+    void generate(const Program& program) {
+        declarePrintf();
+
+        // Generate code for all top-level statements
+        for (const auto& stmt : program.statements) {
+            generateStatement(stmt.get());
+        }
+    }
+
+    void printIR() {
+        module->print(outs(), nullptr);
+    }
+
+    void writeObjectFile(const string& filename) {
+        // Get target triple
+        auto targetTriple = sys::getDefaultTargetTriple();
+        module->setTargetTriple(Triple(targetTriple));  // <- FIXED: Wrap in Triple()
+
+        string error;
+        auto target = TargetRegistry::lookupTarget(targetTriple, error);
+
+        if (!target) {
+            errs() << "Error: " << error << "\n";
+            return;
+        }
+
+        auto CPU = "generic";
+        auto features = "";
+
+        TargetOptions opt;
+        auto machine = target->createTargetMachine(
+            Triple(targetTriple), CPU, features, opt, std::nullopt
+        );
+
+        module->setDataLayout(machine->createDataLayout());
+
+        // Open output file
+        error_code EC;
+        raw_fd_ostream dest(filename, EC, sys::fs::OF_None);
+
+        if (EC) {
+            errs() << "Could not open file: " << EC.message() << "\n";
+            return;
+        }
+
+        // Emit object file
+        legacy::PassManager pass;
+        auto fileType = CodeGenFileType::ObjectFile;  // <- FIXED: CGFT_ObjectFile -> CodeGenFileType::ObjectFile
+
+        if (machine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
+            errs() << "Target machine can't emit object file\n";
+            return;
+        }
+
+        pass.run(*module);
+        dest.flush();
+    }
+
+private:
+    unique_ptr<LLVMContext> context;
+    unique_ptr<IRBuilder<>> builder;
+    unique_ptr<Module> module;
+
+    // Symbol table: variable name -> LLVM Value*
+    unordered_map<string, Value*> namedValues;
+
+    // Function table: function name -> LLVM Function*
+    unordered_map<string, Function*> functions;
+
+    // Current function being compiled
+    Function* currentFunction = nullptr;
+
+    // ========================================================================
+    // Type Conversion
+    // ========================================================================
+
+    Type* getType(const string& typeName) {
+        if (typeName == "int") {
+            return Type::getInt32Ty(*context);
+        } else if (typeName == "bool") {
+            return Type::getInt1Ty(*context);
+        } else if (typeName == "float") {
+            return Type::getDoubleTy(*context);
+        } else if (typeName == "void") {
+            return Type::getVoidTy(*context);
+        } else if (typeName == "string") {
+            return PointerType::getUnqual(*context);
+        }
+
+        // Default to int
+        return Type::getInt32Ty(*context);
+    }
+
+    // ========================================================================
+    // Statement Generation
+    // ========================================================================
+
+    void generateStatement(Statement* stmt) {
+        if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt)) {
+            generateFunction(funcDecl);
+        } else if (auto* varDecl = dynamic_cast<VariableDeclaration*>(stmt)) {
+            generateVariableDeclaration(varDecl);
+        } else if (auto* returnStmt = dynamic_cast<ReturnStatement*>(stmt)) {
+            generateReturn(returnStmt);
+        } else if (auto* ifStmt = dynamic_cast<IfStatement*>(stmt)) {
+            generateIf(ifStmt);
+        } else if (auto* whileStmt = dynamic_cast<WhileStatement*>(stmt)) {
+            generateWhile(whileStmt);
+        } else if (auto* exprStmt = dynamic_cast<ExpressionStatement*>(stmt)) {
+            generateExpression(exprStmt->expression.get());
+        }
+    }
+
+    // ========================================================================
+    // Function Generation
+    // ========================================================================
+
+    void generateFunction(FunctionDeclaration* funcDecl) {
+        // Build parameter types
+        vector<Type*> paramTypes;
+        for (const auto& param : funcDecl->parameters) {
+            paramTypes.push_back(getType(param.type));
+        }
+
+        // Build function type
+        Type* returnType = getType(funcDecl->returnType);
+        FunctionType* funcType = FunctionType::get(returnType, paramTypes, false);
+
+        // Create function
+        Function* function = Function::Create(
+            funcType,
+            Function::ExternalLinkage,
+            funcDecl->name,
+            module.get()
+        );
+
+        // Store in function table
+        functions[funcDecl->name] = function;
+        currentFunction = function;
+
+        // Set parameter names and add to symbol table
+        size_t idx = 0;
+        for (auto& arg : function->args()) {
+            arg.setName(funcDecl->parameters[idx].name);
+            namedValues[funcDecl->parameters[idx].name] = &arg;
+            idx++;
+        }
+
+        // Create entry block
+        BasicBlock* entryBlock = BasicBlock::Create(*context, "entry", function);
+        builder->SetInsertPoint(entryBlock);
+
+        // Generate function body
+        for (const auto& stmt : funcDecl->body) {
+            generateStatement(stmt.get());
+        }
+
+        // Add default return if missing
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            if (returnType->isVoidTy()) {
+                builder->CreateRetVoid();
+            } else if (returnType->isIntegerTy()) {
+                builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
+            } else {
+                builder->CreateRetVoid();
+            }
+        }
+
+        // Verify function
+        verifyFunction(*function, &errs());
+
+        // Clear local symbol table
+        namedValues.clear();
+        currentFunction = nullptr;
+    }
+
+    // ========================================================================
+    // Variable Declaration
+    // ========================================================================
+
+    void generateVariableDeclaration(VariableDeclaration* varDecl) {
+        Value* initValue = nullptr;
+
+        if (varDecl->initializer) {
+            initValue = generateExpression(varDecl->initializer.get());
+        } else {
+            // Default value
+            Type* type = getType(varDecl->type);
+            if (type->isIntegerTy()) {
+                initValue = ConstantInt::get(*context, APInt(32, 0));
+            }
+        }
+
+        // For now, store in symbol table (later: proper alloca)
+        namedValues[varDecl->name] = initValue;
+    }
+
+    // ========================================================================
+    // Return Statement
+    // ========================================================================
+
+    void generateReturn(ReturnStatement* returnStmt) {
+        if (returnStmt->value) {
+            Value* retValue = generateExpression(returnStmt->value.get());
+            builder->CreateRet(retValue);
+        } else {
+            builder->CreateRetVoid();
+        }
+    }
+
+    // ========================================================================
+    // If Statement
+    // ========================================================================
+
+    void generateIf(IfStatement* ifStmt) {
+        Value* condition = generateExpression(ifStmt->condition.get());
+
+        // Convert to boolean if needed
+        if (!condition->getType()->isIntegerTy(1)) {
+            condition = builder->CreateICmpNE(
+                condition,
+                ConstantInt::get(*context, APInt(32, 0)),
+                "ifcond"
+            );
+        }
+
+        Function* function = builder->GetInsertBlock()->getParent();
+
+        // Create blocks
+        BasicBlock* thenBB = BasicBlock::Create(*context, "then", function);
+        BasicBlock* elseBB = BasicBlock::Create(*context, "else");
+        BasicBlock* mergeBB = BasicBlock::Create(*context, "ifcont");
+
+        if (!ifStmt->elseBranch.empty()) {
+            builder->CreateCondBr(condition, thenBB, elseBB);
+        } else {
+            builder->CreateCondBr(condition, thenBB, mergeBB);
+        }
+
+        // Then block
+        builder->SetInsertPoint(thenBB);
+        for (const auto& stmt : ifStmt->thenBranch) {
+            generateStatement(stmt.get());
+        }
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            builder->CreateBr(mergeBB);
+        }
+
+        // Else block
+        if (!ifStmt->elseBranch.empty()) {
+            function->insert(function->end(), elseBB);
+            builder->SetInsertPoint(elseBB);
+            for (const auto& stmt : ifStmt->elseBranch) {
+                generateStatement(stmt.get());
+            }
+            if (!builder->GetInsertBlock()->getTerminator()) {
+                builder->CreateBr(mergeBB);
+            }
+        }
+
+        // Merge block
+        function->insert(function->end(), mergeBB);
+        builder->SetInsertPoint(mergeBB);
+    }
+
+    // ========================================================================
+    // While Statement
+    // ========================================================================
+
+    void generateWhile(WhileStatement* whileStmt) {
+        Function* function = builder->GetInsertBlock()->getParent();
+
+        BasicBlock* condBB = BasicBlock::Create(*context, "whilecond", function);
+        BasicBlock* loopBB = BasicBlock::Create(*context, "whileloop");
+        BasicBlock* afterBB = BasicBlock::Create(*context, "afterloop");
+
+        // Jump to condition
+        builder->CreateBr(condBB);
+
+        // Condition block
+        builder->SetInsertPoint(condBB);
+        Value* condition = generateExpression(whileStmt->condition.get());
+
+        if (!condition->getType()->isIntegerTy(1)) {
+            condition = builder->CreateICmpNE(
+                condition,
+                ConstantInt::get(*context, APInt(32, 0)),
+                "loopcond"
+            );
+        }
+
+        builder->CreateCondBr(condition, loopBB, afterBB);
+
+        // Loop body
+        function->insert(function->end(), loopBB);
+        builder->SetInsertPoint(loopBB);
+        for (const auto& stmt : whileStmt->body) {
+            generateStatement(stmt.get());
+        }
+        builder->CreateBr(condBB);
+
+        // After loop
+        function->insert(function->end(), afterBB);
+        builder->SetInsertPoint(afterBB);
+    }
+
+    // ========================================================================
+    // Expression Generation
+    // ========================================================================
+
+    Value* generateExpression(Expression* expr) {
+        if (auto* intLit = dynamic_cast<IntLiteral*>(expr)) {
+            return ConstantInt::get(*context, APInt(32, intLit->value));
+        }
+        else if (auto* boolLit = dynamic_cast<BoolLiteral*>(expr)) {
+            return ConstantInt::get(*context, APInt(1, boolLit->value ? 1 : 0));
+        }
+        else if (auto* strLit = dynamic_cast<::StringLiteral*>(expr)) {
+            return builder->CreateGlobalStringPtr(strLit->value);
+        }
+        else if (auto* var = dynamic_cast<Variable*>(expr)) {
+            Value* val = namedValues[var->name];
+            if (!val) {
+                errs() << "Unknown variable: " << var->name << "\n";
+                return nullptr;
+            }
+            return val;
+        }
+        else if (auto* binOp = dynamic_cast<BinaryOperation*>(expr)) {
+            return generateBinaryOp(binOp);
+        }
+        else if (auto* call = dynamic_cast<FunctionCall*>(expr)) {
+            return generateFunctionCall(call);
+        }
+
+        return nullptr;
+    }
+
+    Value* generateBinaryOp(BinaryOperation* binOp) {
+        Value* left = generateExpression(binOp->left.get());
+        Value* right = generateExpression(binOp->right.get());
+
+        if (!left || !right) return nullptr;
+
+        switch (binOp->op) {
+            case TokenType::PLUS:
+                return builder->CreateAdd(left, right, "addtmp");
+            case TokenType::MINUS:
+                return builder->CreateSub(left, right, "subtmp");
+            case TokenType::STAR:
+                return builder->CreateMul(left, right, "multmp");
+            case TokenType::SLASH:
+                return builder->CreateSDiv(left, right, "divtmp");
+            case TokenType::PERCENT:
+                return builder->CreateSRem(left, right, "modtmp");
+            case TokenType::EQUAL_EQUAL:
+                return builder->CreateICmpEQ(left, right, "eqtmp");
+            case TokenType::BANG_EQUAL:
+                return builder->CreateICmpNE(left, right, "netmp");
+            case TokenType::LESS:
+                return builder->CreateICmpSLT(left, right, "lttmp");
+            case TokenType::LESS_EQUAL:
+                return builder->CreateICmpSLE(left, right, "letmp");
+            case TokenType::GREATER:
+                return builder->CreateICmpSGT(left, right, "gttmp");
+            case TokenType::GREATER_EQUAL:
+                return builder->CreateICmpSGE(left, right, "getmp");
+            default:
+                errs() << "Unknown binary operator\n";
+                return nullptr;
+        }
+    }
+
+    Value* generatePrint(FunctionCall* call) {
+        Function* printfFunc = module->getFunction("printf");
+
+        if (call->arguments.empty()) {
+            errs() << "print() requires at least one argument\n";
+            return nullptr;
+        }
+
+        // Get the first argument
+        Value* arg = generateExpression(call->arguments[0].get());
+        if (!arg) return nullptr;
+
+        Value* formatStr = nullptr;
+        vector<Value*> printfArgs;
+
+        // Determine format string based on type
+        if (arg->getType()->isIntegerTy(32)) {
+            // Integer
+            formatStr = builder->CreateGlobalStringPtr("%d\n");
+            printfArgs.push_back(formatStr);
+            printfArgs.push_back(arg);
+        } else if (arg->getType()->isIntegerTy(1)) {
+            // Boolean - convert to string
+            Value* trueStr = builder->CreateGlobalStringPtr("true\n");
+            Value* falseStr = builder->CreateGlobalStringPtr("false\n");
+
+            formatStr = builder->CreateSelect(arg, trueStr, falseStr);
+            printfArgs.push_back(formatStr);
+        } else if (arg->getType()->isDoubleTy()) {
+            // Float
+            formatStr = builder->CreateGlobalStringPtr("%f\n");
+            printfArgs.push_back(formatStr);
+            printfArgs.push_back(arg);
+        } else if (arg->getType()->isPointerTy()) {
+            formatStr = builder->CreateGlobalStringPtr("%s\n");
+            printfArgs.push_back(formatStr);
+            printfArgs.push_back(arg);
+        } else {
+            errs() << "Unsupported type for print()\n";
+            return nullptr;
+        }
+
+        return builder->CreateCall(printfFunc, printfArgs, "printcall");
+    }
+
+    Value* generateFunctionCall(FunctionCall* call) {
+        // Special handling for print()
+        if (call->name == "print") {
+            return generatePrint(call);
+        }
+
+        Function* calleeF = functions[call->name];
+        if (!calleeF) {
+            errs() << "Unknown function: " << call->name << "\n";
+            return nullptr;
+        }
+
+        if (calleeF->arg_size() != call->arguments.size()) {
+            errs() << "Incorrect # of arguments passed\n";
+            return nullptr;
+        }
+
+        vector<Value*> args;
+        for (const auto& arg : call->arguments) {
+            args.push_back(generateExpression(arg.get()));
+            if (!args.back()) return nullptr;
+        }
+
+        // Wenn Funktion void zurückgibt, gib nullptr zurück
+        if (calleeF->getReturnType()->isVoidTy()) {
+            builder->CreateCall(calleeF, args);
+            return nullptr;
+        }
+
+        return builder->CreateCall(calleeF, args, "calltmp");
+    }
+};
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        cerr << "Usage: mylang <file.ml> [-o output]" << endl;
         return 1;
     }
 
-    ifstream file(argv[1]);
+    string inputFile = argv[1];
+    string outputFile = "output.o";
+    string executableFile = "a.out";
+    bool debug = false;  // Debug standardmäßig aus
+    bool run = true;     // Standardmäßig ausführen
+
+    // Parse command line options
+    for (int i = 2; i < argc; i++) {
+        if (string(argv[i]) == "-o" && i + 1 < argc) {
+            executableFile = argv[i + 1];
+            i++;
+        } else if (string(argv[i]) == "--debug") {
+            debug = true;
+        } else if (string(argv[i]) == "--no-run") {
+            run = false;
+        }
+    }
+
+    // Read source file
+    ifstream file(inputFile);
     if (!file) {
-        cerr << "Could not open file: " << argv[1] << endl;
+        cerr << "Could not open file: " << inputFile << endl;
         return 1;
     }
 
@@ -1371,23 +1913,70 @@ int main(int argc, char* argv[]) {
     buffer << file.rdbuf();
     string source = buffer.str();
 
-    // Tokenize
-    Lexer lexer(source);
-    auto tokens = lexer.tokenize();
+    try {
+        // Lexer
+        Lexer lexer(source);
+        auto tokens = lexer.tokenize();
 
-    if (debug) {
-        cout << "=== TOKENS ===" << endl;
-        for (const auto& token : tokens) {
-            cout << token << endl;
+        if (debug) {
+            cout << "=== TOKENS ===" << endl;
+            for (const auto& token : tokens) {
+                cout << token << endl;
+            }
+            cout << endl;
         }
-    }
 
-    Parser parser(tokens);
-    auto program = parser.parse();
+        // Parser
+        Parser parser(tokens);
+        auto program = parser.parse();
 
-    if (debug) {
-        cout << "=== AST ===" << endl;
-        program->print();
+        if (debug) {
+            cout << "=== AST ===" << endl;
+            program->print();
+            cout << endl;
+        }
+
+        // Code Generator
+        if (debug) {
+            cout << "=== LLVM IR ===" << endl;
+        }
+
+        CodeGenerator codegen;
+        codegen.generate(*program);
+
+        if (debug) {
+            codegen.printIR();
+            cout << endl;
+        }
+
+        // Write object file
+        codegen.writeObjectFile(outputFile);
+
+        if (run) {
+            // Link with clang
+            string linkCommand = "clang " + outputFile + " -o " + executableFile + " 2>/dev/null";
+            int linkResult = system(linkCommand.c_str());
+
+            if (linkResult != 0) {
+                cerr << "Linking failed!" << endl;
+                return 1;
+            }
+
+            // Execute
+            string execCommand = "./" + executableFile;
+            int execResult = system(execCommand.c_str());
+
+            // Cleanup
+            remove(outputFile.c_str());
+            remove(executableFile.c_str());
+
+            // Return the exit code from the program
+            return WEXITSTATUS(execResult);
+        }
+
+    } catch (const exception& e) {
+        cerr << "Error: " << e.what() << endl;
+        return 1;
     }
 
     return 0;
