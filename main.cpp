@@ -712,7 +712,9 @@ private:
     unique_ptr<Statement> parseIfStatement() {
         auto condition = parseExpression();
         consume(TokenType::COLON, "Expected ':' after if condition");
-        match(TokenType::NEWLINE);
+
+        // Skip all newlines
+        while (match(TokenType::NEWLINE)) {}
 
         vector<unique_ptr<Statement> > thenBranch = parseBlock();
         vector<unique_ptr<Statement> > elseBranch;
@@ -734,7 +736,9 @@ private:
     unique_ptr<Statement> parseWhileStatement() {
         auto condition = parseExpression();
         consume(TokenType::COLON, "Expected ':' after while condition");
-        match(TokenType::NEWLINE);
+
+        // Skip all newlines
+        while (match(TokenType::NEWLINE)) {}
 
         vector<unique_ptr<Statement> > body = parseBlock();
 
