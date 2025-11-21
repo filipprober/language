@@ -4,11 +4,10 @@ fn main():
      */
     print("Hello World")
 
+    // Check if true, print "true"
     if true:
-        # comment
-        // Single line comment
         print(true)
 
+    # Check if true, print "false"
     if true:
-        # another comment
         print(false)
