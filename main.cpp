@@ -1561,10 +1561,52 @@ public:
         );
     }
 
+    void declareFunction(FunctionDeclaration* funcDecl) {
+        // Build parameter types
+        vector<Type*> paramTypes;
+        for (const auto& param : funcDecl->parameters) {
+            paramTypes.push_back(getType(param.type));
+        }
+
+        // Build function type
+        Type* returnType;
+        if (funcDecl->name == "main") {
+            returnType = Type::getInt32Ty(*context);
+        } else {
+            returnType = getType(funcDecl->returnType);
+        }
+        FunctionType* funcType = FunctionType::get(returnType, paramTypes, false);
+
+        string mangledName = mangleFunctionName(funcDecl->name, funcDecl->parameters);
+
+        if (funcDecl->name != "main") {
+            mangledName = "c_" + mangledName;
+        }
+
+        // Create function (without body)
+        Function* function = Function::Create(
+            funcType,
+            Function::ExternalLinkage,
+            mangledName,
+            module.get()
+        );
+
+        // Store in function table
+        string tableName = mangleFunctionName(funcDecl->name, funcDecl->parameters);
+        functions[tableName] = function;
+    }
+
     void generate(const Program& program) {
         declarePrintf();
 
-        // Generate code for all top-level statements
+        // Step 1: Collect all functions (signatures only)
+        for (const auto& stmt : program.statements) {
+            if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+                declareFunction(funcDecl);
+            }
+        }
+
+        // Step 2: Generate function bodies
         for (const auto& stmt : program.statements) {
             generateStatement(stmt.get());
         }
@@ -1654,6 +1696,76 @@ private:
         return Type::getInt32Ty(*context);
     }
 
+    string mangleFunctionName(const string& name, const vector<Parameter>& parameters) {
+        // Never mangle main function.
+        if (name == "main") {
+            return "main";
+        }
+
+        string mangledName = name;
+
+        for (const auto& parameter : parameters) {
+            mangledName += "_" + parameter.type;
+        }
+
+        // Add "_void" if no parameter is defined.
+        if (parameters.empty()) {
+            mangledName += "_void";
+        }
+
+        return mangledName;
+    }
+
+    string mangleFunctionName(const string& name, const vector<string>& paramTypes) {
+        if (name == "main") {
+            return "main";
+        }
+
+        string mangledName = name;
+
+        for (const auto& type : paramTypes) {
+            mangledName += "_" + type;
+        }
+
+        // Add "_void" if no param type was defined.
+        if (paramTypes.empty()) {
+            mangledName += "_void";
+        }
+
+        return mangledName;
+    }
+
+    string getExpressionType(Expression* expr) {
+        if (dynamic_cast<IntLiteral*>(expr)) {
+            return "int";
+        }
+        else if (dynamic_cast<BoolLiteral*>(expr)) {
+            return "bool";
+        }
+        else if (dynamic_cast<::StringLiteral*>(expr)) {
+            return "string";
+        }
+        else if (auto* var = dynamic_cast<Variable*>(expr)) {
+            // Schaue in die Symbol-Tabelle
+            Value* varPtr = namedValues[var->name];
+            if (!varPtr) return "int"; // Default
+
+            if (auto* allocaInst = dyn_cast<AllocaInst>(varPtr)) {
+                Type* type = allocaInst->getAllocatedType();
+                if (type->isIntegerTy(32)) return "int";
+                if (type->isIntegerTy(1)) return "bool";
+                if (type->isDoubleTy()) return "float";
+                if (type->isPointerTy()) return "string";
+            }
+        }
+        else if (auto* binOp = dynamic_cast<BinaryOperation*>(expr)) {
+            // Meiste binäre Operatoren geben den Typ der Operanden zurück
+            return getExpressionType(binOp->left.get());
+        }
+
+        return "int"; // Default
+    }
+
     // ========================================================================
     // Statement Generation
     // ========================================================================
@@ -1686,50 +1798,23 @@ private:
     // Function Generation
     // ========================================================================
 
-    void generateFunction(FunctionDeclaration *funcDecl) {
-        // Build parameter types
-        vector<Type *> paramTypes;
-        for (const auto &param: funcDecl->parameters) {
-            paramTypes.push_back(getType(param.type));
-        }
-
-        // Build function type
-        Type *returnType;
-        if (funcDecl->name == "main") {
-            returnType = Type::getInt32Ty(*context);
-        } else {
-            returnType = getType(funcDecl->returnType);
-        }
-        FunctionType *funcType = FunctionType::get(returnType, paramTypes, false);
-
-        string mangledName = funcDecl->name;
-        if (funcDecl->name != "main") {
-            mangledName = "c_" + mangledName;
-        }
-
-        // Create function
-        Function *function = Function::Create(
-            funcType,
-            Function::ExternalLinkage,
-            mangledName,
-            module.get()
-        );
-
-        // Store in function table
-        functions[funcDecl->name] = function;
+    void generateFunction(FunctionDeclaration* funcDecl) {
+        // Get the already-declared function
+        string mangledName = mangleFunctionName(funcDecl->name, funcDecl->parameters);
+        Function* function = functions[mangledName];
         currentFunction = function;
 
         // Create entry block
-        BasicBlock *entryBlock = BasicBlock::Create(*context, "entry", function);
+        BasicBlock* entryBlock = BasicBlock::Create(*context, "entry", function);
         builder->SetInsertPoint(entryBlock);
 
         // Create allocas for parameters and store initial values
-        for (auto &arg: function->args()) {
+        for (auto& arg : function->args()) {
             // Set parameter name
             arg.setName(funcDecl->parameters[arg.getArgNo()].name);
 
             // Create alloca for this parameter
-            AllocaInst *alloca = builder->CreateAlloca(
+            AllocaInst* alloca = builder->CreateAlloca(
                 arg.getType(),
                 nullptr,
                 arg.getName()
@@ -1743,16 +1828,16 @@ private:
         }
 
         // Generate function body
-        for (const auto &stmt: funcDecl->body) {
+        for (const auto& stmt : funcDecl->body) {
             generateStatement(stmt.get());
         }
 
         // Add default return if missing
-        BasicBlock *currentBlock = builder->GetInsertBlock();
+        BasicBlock* currentBlock = builder->GetInsertBlock();
         if (currentBlock && !currentBlock->getTerminator()) {
             if (funcDecl->name == "main") {
                 builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
-            } else if (returnType->isVoidTy()) {
+            } else if (function->getReturnType()->isVoidTy()) {
                 builder->CreateRetVoid();
             } else {
                 builder->CreateUnreachable();
@@ -2108,7 +2193,14 @@ private:
             return generatePrint(call);
         }
 
-        Function* calleeF = functions[call->name];
+        vector<string> argTypes;
+        for (const auto& arg : call->arguments) {
+            argTypes.push_back(getExpressionType(arg.get()));
+        }
+
+        string mangledName = mangleFunctionName(call->name, argTypes);
+
+        Function* calleeF = functions[mangledName];
         if (!calleeF) {
             errs() << "Unknown function: " << call->name << "\n";
             return nullptr;
