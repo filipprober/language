@@ -1661,7 +1661,15 @@ private:
     void generateStatement(Statement *stmt) {
         if (auto *funcDecl = dynamic_cast<FunctionDeclaration *>(stmt)) {
             generateFunction(funcDecl);
-        } else if (auto *varDecl = dynamic_cast<VariableDeclaration *>(stmt)) {
+            return;
+        }
+
+        BasicBlock* currentBlock = builder->GetInsertBlock();
+        if (currentBlock && currentBlock->getTerminator()) {
+            return;
+        }
+
+        if (auto *varDecl = dynamic_cast<VariableDeclaration *>(stmt)) {
             generateVariableDeclaration(varDecl);
         } else if (auto *returnStmt = dynamic_cast<ReturnStatement *>(stmt)) {
             generateReturn(returnStmt);
@@ -1694,11 +1702,16 @@ private:
         }
         FunctionType *funcType = FunctionType::get(returnType, paramTypes, false);
 
+        string mangledName = funcDecl->name;
+        if (funcDecl->name != "main") {
+            mangledName = "c_" + mangledName;
+        }
+
         // Create function
         Function *function = Function::Create(
             funcType,
             Function::ExternalLinkage,
-            funcDecl->name,
+            mangledName,
             module.get()
         );
 
@@ -1848,20 +1861,18 @@ private:
             elseHasTerminator = builder->GetInsertBlock()->getTerminator() != nullptr;
         }
 
-        // Nur merge-Block erstellen wenn mindestens ein Zweig NICHT terminiert
+        // Merge block logic
         if (!ifStmt->elseBranch.empty()) {
+            // If-else statement
             if (!thenHasTerminator || !elseHasTerminator) {
-                if (!mergeBB) {
-                    mergeBB = BasicBlock::Create(*context, "ifcont");
-                }
+                // At least one branch needs to jump to merge
+                mergeBB = BasicBlock::Create(*context, "ifcont");
 
-                // Then zum merge springen lassen
                 if (!thenHasTerminator) {
                     builder->SetInsertPoint(thenBB);
                     builder->CreateBr(mergeBB);
                 }
 
-                // Else zum merge springen lassen
                 if (!elseHasTerminator) {
                     builder->SetInsertPoint(elseBB);
                     builder->CreateBr(mergeBB);
@@ -1869,15 +1880,9 @@ private:
 
                 function->insert(function->end(), mergeBB);
                 builder->SetInsertPoint(mergeBB);
-            } else {
-                // Beide Zweige haben Terminator -> kein merge nötig
-                // Setze Insert Point auf einen neuen unreachable Block
-                BasicBlock *unreachableBB = BasicBlock::Create(*context, "unreachable", function);
-                builder->SetInsertPoint(unreachableBB);
-                builder->CreateUnreachable();
             }
         } else {
-            // Nur then-Branch, merge für den Fall dass condition false ist
+            // Simple if without else
             if (!thenHasTerminator) {
                 builder->SetInsertPoint(thenBB);
                 builder->CreateBr(mergeBB);
