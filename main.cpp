@@ -27,6 +27,92 @@
 using namespace std;
 using namespace llvm;
 
+struct SourceLocation
+{
+    int line;
+    int column;
+    int length;
+
+    SourceLocation(int line, int column, int length) :
+        line(line),
+        column(column),
+        length(length) {
+        //
+    }
+};
+
+class ExceptionReporter
+{
+public:
+    ExceptionReporter(const string& source, const string& filename) :
+        source(source),
+        filename(filename),
+        hasErrors(false) {
+        //
+    }
+
+    void error(const SourceLocation& location, const string& message) {
+        hasErrors = true;
+
+        cerr << "\033[1;31mError:\033[0m " << message << endl;
+        cerr << "  \033[1;34m-->\033[0m " << filename << ":" << location.line << ":" << location.column << endl;
+
+        printSourceLine(location);
+    }
+
+    void warning(const SourceLocation& location, const string& message) {
+        cerr << "\033[1;33mWarning:\033[0m " << message << endl;
+        cerr << "  \033[1;34m-->\033[0m " << filename << ":" << location.line << ":" << location.column << endl;
+
+        printSourceLine(location);
+    }
+
+    bool hasError() const {
+        return hasErrors;
+    }
+
+private:
+    string source;
+    string filename;
+    bool hasErrors;
+
+    void printSourceLine(const SourceLocation& location) {
+        // Split source into lines
+        vector<string> lines;
+        stringstream ss(source);
+        string line;
+        while (getline(ss, line)) {
+            lines.push_back(line);
+        }
+
+        if (location.line < 1 || location.line > static_cast<int>(lines.size())) {
+            return;
+        }
+
+        string sourceLine = lines[location.line - 1];
+
+        // Line number padding
+        int lineNumWidth = to_string(location.line).length();
+        string padding(lineNumWidth, ' ');
+
+        cerr << padding << " |" << endl;
+        cerr << location.line << " | " << sourceLine << endl;
+        cerr << padding << " | ";
+
+        // Print spaces until error position
+        for (int i = 0; i < location.column - 1; i++) {
+            cerr << " ";
+        }
+
+        // Print error indicator (^^^)
+        cerr << "\033[1;31m";
+        for (int i = 0; i < location.length; i++) {
+            cerr << "^";
+        }
+        cerr << "\033[0m" << endl;
+        cerr << endl;
+    }
+};
 
 enum class TokenType
 {
@@ -97,16 +183,22 @@ struct Token
 {
     TokenType type;
     string lexeme;
-    int line;
-    int column;
+    SourceLocation location;
 
     Token(TokenType type, const string& lexeme, int line, int column) :
         type(type),
         lexeme(lexeme),
-        line(line),
-        column(column)
+        location(line, column, lexeme.length())
     {
         //
+    }
+
+    Token(TokenType type, const string& lexeme, SourceLocation location) :
+        type(type),
+        lexeme(lexeme),
+        location(location)
+    {
+
     }
 };
 
@@ -524,9 +616,10 @@ public:
 
 class Parser {
 public:
-    explicit Parser(vector<Token> tokens) :
+    explicit Parser(vector<Token> tokens, ExceptionReporter& reporter) :
         tokens(std::move(tokens)),
-        current(0)
+        current(0),
+        reporter(reporter)
     {
         //
     }
@@ -541,9 +634,13 @@ public:
 
             if (isAtEnd()) break;
 
-            auto statement = parseStatement();
-            if (statement) {
-                program->statements.push_back(std::move(statement));
+            try {
+                auto statement = parseStatement();
+                if (statement) {
+                    program->statements.push_back(std::move(statement));
+                }
+            } catch (const runtime_error& e) {
+                synchronize();
             }
         }
 
@@ -553,6 +650,7 @@ public:
 private:
     vector<Token> tokens;
     size_t current;
+    ExceptionReporter& reporter;
 
     bool isAtEnd() const {
         return peek().type == TokenType::EOF_TOKEN;
@@ -597,7 +695,33 @@ private:
     Token consume(TokenType type, const string& message) {
         if (check(type)) return advance();
 
-        throw runtime_error(message + " at line " + to_string(peek().line) + ":" + to_string(peek().column));
+        // Finde das letzte nicht-whitespace Token für bessere Fehlerposition
+        Token errorToken = previous();
+
+        // Skip zurück über NEWLINE tokens
+        size_t pos = current - 1;
+        while (pos > 0 && tokens[pos].type == TokenType::NEWLINE) {
+            pos--;
+        }
+        if (pos > 0) {
+            errorToken = tokens[pos];
+        }
+
+        // Erstelle informative Fehlermeldung
+        string fullMessage = message;
+        Token nextToken = peek();
+
+        if (nextToken.type != TokenType::EOF_TOKEN) {
+            fullMessage += ", got '" + nextToken.lexeme + "'";
+        }
+
+        reporter.error(errorToken.location, fullMessage);
+        throw runtime_error("Parse error");
+    }
+
+    void reportError(const string& message) {
+        reporter.error(peek().location, message);
+        throw runtime_error("Parse exception");
     }
 
     void synchronize() {
@@ -668,7 +792,7 @@ private:
                 consume(TokenType::COLON, "Expected ':' after parameter name");
 
                 if (!match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
-                    throw runtime_error("Expected type after ':' at line " + to_string(peek().line));
+                    reportError("Expected type after ':'");
                 }
                 Token paramType = previous();
                 parameters.emplace_back(paramName.lexeme, paramType.lexeme);
@@ -842,7 +966,7 @@ private:
             // Left side must be a variable
             auto* var = dynamic_cast<Variable*>(expr.get());
             if (!var) {
-                throw runtime_error("Invalid assignment target at line " + to_string(peek().line));
+                reportError("Invalid assignment target");
             }
 
             string name = var->name;
@@ -954,7 +1078,8 @@ private:
             return expression;
         }
 
-        throw runtime_error("Expected expression at line " + to_string(peek().line));
+        reportError("Expected expression");
+        return nullptr;
     }
 };
 
@@ -1091,7 +1216,7 @@ string tokenTypeToString(TokenType type) {
 ostream& operator<<(ostream& os, const Token& token) {
     os  << "Token(" << tokenTypeToString(token.type)
         << ", \"" << token.lexeme << "\", "
-        << token.line << ":" << token.column << ")";
+        << token.location.line << ":" << token.location.column << ")";
 
     return os;
 }
@@ -1099,7 +1224,7 @@ ostream& operator<<(ostream& os, const Token& token) {
 class Lexer
 {
 public:
-    explicit Lexer(const string& source);
+    explicit Lexer(const string& source, ExceptionReporter& reporter);
 
     vector<Token> tokenize();
 
@@ -1109,6 +1234,7 @@ private:
     int line = 1;
     int column = 1;
     vector<Token> tokens;
+    ExceptionReporter& reporter;
 
     vector<int> indentStack = {0};
     bool atLineStart = true;
@@ -1179,24 +1305,25 @@ unordered_map<string, TokenType> Lexer::keywords = {
     {"void", TokenType::VOID},
 };
 
-Lexer::Lexer(const string& source) : source(source) {}
+Lexer::Lexer(const string& source, ExceptionReporter& reporter) : source(source), reporter(reporter) {}
 
 vector<Token> Lexer::tokenize() {
     while (!isAtEnd()) {
-        // Handle indentation at line start
-        if (atLineStart && peek() != '\n') {
-            handleIndentation();
+        try {
+            if (atLineStart && peek() != '\n') {
+                handleIndentation();
+            }
+            scanToken();
+        } catch (const runtime_error &e) {
+            // Error already reported, try to continue
+            advance();
         }
-
-        scanToken();
     }
 
-    // WICHTIG: Füge ein finales NEWLINE hinzu, falls die letzte Zeile keins hat
     if (!tokens.empty() && tokens.back().type != TokenType::NEWLINE) {
         addToken(TokenType::NEWLINE, "\\n");
     }
 
-    // Jetzt die DEDENTs hinzufügen
     while (indentStack.size() > 1) {
         indentStack.pop_back();
         addToken(TokenType::DEDENT, "DEDENT");
@@ -1445,7 +1572,10 @@ void Lexer::scanString() {
     }
 
     if (isAtEnd()) {
-        throw std::runtime_error("Unterminated string");
+        int length = current - start;
+        SourceLocation location(line, column - length, length);
+        reporter.error(location, "Unterminated string literal");
+        throw runtime_error("Unterminated string");
     }
 
     advance(); // closing "
@@ -1517,7 +1647,9 @@ void Lexer::handleIndentation() {
 
         // Check for indentation error
         if (indentStack.empty() || indentStack.back() != currentIndent) {
-            throw runtime_error("Indentation error at line " + to_string(line));
+            SourceLocation location(line, 1, currentIndent);
+            reporter.error(location, "Inconsistent indentation");
+            throw runtime_error("Indentation exception");
         }
     }
 }
@@ -2267,10 +2399,16 @@ int main(int argc, char* argv[]) {
     buffer << file.rdbuf();
     string source = buffer.str();
 
+    ExceptionReporter reporter(source, inputFile);
+
     try {
         // Lexer
-        Lexer lexer(source);
+        Lexer lexer(source, reporter);
         auto tokens = lexer.tokenize();
+
+        if (reporter.hasError()) {
+            return 1;
+        }
 
         if (debug) {
             cout << "=== TOKENS ===" << endl;
@@ -2281,8 +2419,12 @@ int main(int argc, char* argv[]) {
         }
 
         // Parser
-        Parser parser(tokens);
+        Parser parser(tokens, reporter);
         auto program = parser.parse();
+
+        if (reporter.hasError()) {
+            return 1;
+        }
 
         if (debug) {
             cout << "=== AST ===" << endl;
@@ -2329,7 +2471,9 @@ int main(int argc, char* argv[]) {
         }
 
     } catch (const exception& e) {
-        cerr << "Error: " << e.what() << endl;
+        if (!reporter.hasError()) {
+            cerr << "Internal error: " << e.what() << endl;
+        }
         return 1;
     }
 
