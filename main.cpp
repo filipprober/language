@@ -145,6 +145,7 @@ enum class TokenType
     INTEGER_LITERAL,
     FLOAT_LITERAL,
     STRING_LITERAL,
+    INTERPOLATED_STRING,
 
     // ======================
     // Operators
@@ -256,6 +257,26 @@ public:
 
     void print(int indent = 0) const override {
         cout << string(indent, ' ') << "StringLiteral(" << value << ")" << endl;
+    }
+};
+
+class InterpolatedString : public Expression {
+public:
+    string template_str;
+    vector<string> variables;
+
+    InterpolatedString(const string& template_str, vector<string> variables) :
+        template_str(template_str),
+        variables(std::move(variables)) {
+        //
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "InterpolatedString(\"" << template_str << "\")" << endl;
+
+        for (const auto& var : variables) {
+            cout << string(indent + 2, ' ') << "Variable: " << var << endl;
+        }
     }
 };
 
@@ -1084,6 +1105,27 @@ private:
             return make_unique<::StringLiteral>(previous().lexeme);
         }
 
+        // Interpolated String: @"Hello {name}"
+        if (match(TokenType::INTERPOLATED_STRING)) {
+            string template_str = previous().lexeme;
+            vector<string> variables;
+
+            // Extract variable names from template
+            size_t pos = 0;
+            while ((pos = template_str.find('{', pos)) != string::npos) {
+                size_t end = template_str.find('}', pos);
+                if (end != string::npos) {
+                    string varName = template_str.substr(pos + 1, end - pos - 1);
+                    variables.push_back(varName);
+                    pos = end + 1;
+                } else {
+                    break;
+                }
+            }
+
+            return make_unique<InterpolatedString>(template_str, std::move(variables));
+        }
+
         // Variable oder Function Call
         if (match(TokenType::IDENTIFIER)) {
             string name = previous().lexeme;
@@ -1185,6 +1227,7 @@ string tokenTypeToString(TokenType type) {
         case TokenType::INTEGER_LITERAL: return "INTEGER_LITERAL";
         case TokenType::FLOAT_LITERAL: return "FLOAT_LITERAL";
         case TokenType::STRING_LITERAL: return "STRING_LITERAL";
+        case TokenType::INTERPOLATED_STRING: return "INTERPOLATED_STRING";
 
         // ======================
         // Operators
@@ -1290,6 +1333,7 @@ private:
     void scanString();
     void scanIdentifier();
     void scanComment();
+    void scanInterpolatedString();
     void handleIndentation();
 
     bool isDigit(char c) const;
@@ -1579,6 +1623,13 @@ void Lexer::scanToken() {
             scanComment();
             break;
 
+        case '@':
+            if (peek() == '"') {
+                advance();
+                scanInterpolatedString();
+            }
+            break;
+
         default:
             if (isDigit(c)) {
                 current--; // Go back
@@ -1658,6 +1709,48 @@ void Lexer::scanComment() {
     while (peek() != '\n' && !isAtEnd()) {
         advance();
     }
+}
+
+void Lexer::scanInterpolatedString() {
+    size_t start = current;
+    string result;
+
+    while (peek() != '"' && !isAtEnd()) {
+        if (peek() == '{') {
+            // Variable reference found
+            advance(); // consume {
+
+            // Read variable name
+            size_t varStart = current;
+            while (isAlphaNumeric(peek()) && peek() != '}') {
+                advance();
+            }
+
+            if (peek() != '}') {
+                SourceLocation location(line, column, current - start);
+                reporter.error(location, "Expected '}' in interpolated string");
+                throw runtime_error("Interpolation error");
+            }
+
+            string varName = source.substr(varStart, current - varStart);
+            result += "{" + varName + "}"; // Keep the placeholder
+
+            advance(); // consume }
+        } else {
+            result += peek();
+            advance();
+        }
+    }
+
+    if (isAtEnd()) {
+        SourceLocation location(line, column, current - start);
+        reporter.error(location, "Unterminated interpolated string");
+        throw runtime_error("Unterminated interpolated string");
+    }
+
+    advance(); // closing "
+
+    addToken(TokenType::INTERPOLATED_STRING, result);
 }
 
 void Lexer::handleIndentation() {
@@ -2287,6 +2380,9 @@ private:
         else if (auto* strLit = dynamic_cast<::StringLiteral*>(expr)) {
             return builder->CreateGlobalStringPtr(strLit->value);
         }
+        else if (auto* interpStr = dynamic_cast<InterpolatedString*>(expr)) {
+            return generateInterpolatedString(interpStr);
+        }
         else if (auto* var = dynamic_cast<Variable*>(expr)) {
             Value* varPtr = namedValues[var->name];
             if (!varPtr) {
@@ -2411,6 +2507,81 @@ private:
                 errs() << "Unknown binary operator\n";
                 return nullptr;
         }
+    }
+
+    Value* generateInterpolatedString(InterpolatedString* interpStr) {
+        string template_str = interpStr->template_str;
+        vector<Value*> parts;
+
+        size_t lastPos = 0;
+        size_t pos = 0;
+
+        while ((pos = template_str.find('{', lastPos)) != string::npos) {
+            // Add literal part before variable
+            if (pos > lastPos) {
+                string literal = template_str.substr(lastPos, pos - lastPos);
+                parts.push_back(builder->CreateGlobalStringPtr(literal));
+            }
+
+            // Find variable name
+            size_t end = template_str.find('}', pos);
+            string varName = template_str.substr(pos + 1, end - pos - 1);
+
+            // Get variable value and convert to string
+            Value* varPtr = namedValues[varName];
+            if (!varPtr) {
+                errs() << "Unknown variable in interpolation: " << varName << "\n";
+                return nullptr;
+            }
+
+            Value* varValue = nullptr;
+            if (auto* allocaInst = dyn_cast<AllocaInst>(varPtr)) {
+                varValue = builder->CreateLoad(
+                    allocaInst->getAllocatedType(),
+                    varPtr,
+                    varName.c_str()
+                );
+            }
+
+            // Convert to string
+            Value* strValue = convertToString(varValue);
+            parts.push_back(strValue);
+
+            lastPos = end + 1;
+        }
+
+        // Add remaining literal part
+        if (lastPos < template_str.length()) {
+            string literal = template_str.substr(lastPos);
+            parts.push_back(builder->CreateGlobalStringPtr(literal));
+        }
+
+        // Concatenate all parts
+        if (parts.empty()) {
+            return builder->CreateGlobalStringPtr("");
+        }
+
+        Value* result = parts[0];
+        for (size_t i = 1; i < parts.size(); i++) {
+            // Use existing concatenation logic
+            Function *strlenFunc = module->getFunction("strlen");
+            Function *mallocFunc = module->getFunction("malloc");
+            Function *strcpyFunc = module->getFunction("strcpy");
+            Function *strcatFunc = module->getFunction("strcat");
+
+            Value *len1 = builder->CreateCall(strlenFunc, {result});
+            Value *len2 = builder->CreateCall(strlenFunc, {parts[i]});
+            Value *totalLen = builder->CreateAdd(len1, len2);
+            totalLen = builder->CreateAdd(totalLen, ConstantInt::get(*context, APInt(64, 1)));
+
+            Value *newResult = builder->CreateCall(mallocFunc, {totalLen});
+            builder->CreateCall(strcpyFunc, {newResult, result});
+            builder->CreateCall(strcatFunc, {newResult, parts[i]});
+
+            result = newResult;
+        }
+
+        return result;
     }
 
     Value* generateUnaryOp(UnaryOperation* unaryOp) {
