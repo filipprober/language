@@ -2,20 +2,34 @@
 
 echo "Building mylang with LLVM..."
 
-LLVM_CONFIG="/opt/homebrew/opt/llvm/bin/llvm-config"
+ARCHITECTURE=$(uname -m)
 
-if ! command -v $LLVM_CONFIG &> /dev/null; then
-    echo "Error: llvm-config not found!"
+echo "Detected architecture: $ARCHITECTURE"
+
+if [ "$ARCHITECTURE" = "arm64" ] || [ "$ARCHITECTURE" = "aarch64" ]; then
+    LLVM_CONFIG="/opt/homebrew/opt/llvm/bin/llvm-config"
+    HOMEBREW_LIB="/opt/homebrew/lib"
+    echo "Using ARM64 LLVM (Homebrew)"
+elif [ "$ARCHITECTURE" = "x86_64" ]; then
+    LLVM_CONFIG="/usr/local/opt/llvm/bin/llvm-config"
+    HOMEBREW_LIB="/usr/local/lib"
+    echo "Using x86_64 LLVM"
+else
+    echo "Error: Unsupported architecture: $ARCHITECTURE"
     exit 1
 fi
 
+if ! command -v $LLVM_CONFIG &> /dev/null; then
+    echo "Error: llvm-config not found at $LLVM_CONFIG!"
+    echo "Please install LLVM via Homebrew: brew install llvm"
+    exit 1
+fi
 echo "Using LLVM version: $($LLVM_CONFIG --version)"
 
-# System clang mit allen paths
 /usr/bin/clang++ -std=c++20 -g \
     -I$($LLVM_CONFIG --includedir) \
     -L$($LLVM_CONFIG --libdir) \
-    -L/opt/homebrew/lib \
+    -L$HOMEBREW_LIB \
     -fexceptions -frtti \
     -Wno-deprecated-declarations \
     -o mylang main.cpp \
