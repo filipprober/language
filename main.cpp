@@ -1019,9 +1019,21 @@ private:
     }
 
     unique_ptr<Expression> parseAddition() {
-        auto expression = parseMultiplication();
+        auto expression = parseStringConcatenation();
 
         while (match({TokenType::PLUS, TokenType::MINUS})) {
+            TokenType op = previous().type;
+            auto right = parseStringConcatenation();
+            expression = make_unique<BinaryOperation>(std::move(expression), op, std::move(right));
+        }
+
+        return expression;
+    }
+
+    unique_ptr<Expression> parseStringConcatenation() {
+        auto expression = parseMultiplication();
+
+        while (match(TokenType::DOT)) {
             TokenType op = previous().type;
             auto right = parseMultiplication();
             expression = make_unique<BinaryOperation>(std::move(expression), op, std::move(right));
@@ -1773,8 +1785,60 @@ public:
         functions[tableName] = function;
     }
 
+    void declareStringFunctions() {
+        // strlen
+        FunctionType* strlenType = FunctionType::get(
+            Type::getInt64Ty(*context),
+            {PointerType::get(Type::getInt8Ty(*context), 0)},
+            false
+        );
+        Function::Create(strlenType, Function::ExternalLinkage, "strlen", module.get());
+
+        // malloc
+        FunctionType* mallocType = FunctionType::get(
+            PointerType::get(Type::getInt8Ty(*context), 0),
+            {Type::getInt64Ty(*context)},
+            false
+        );
+        Function::Create(mallocType, Function::ExternalLinkage, "malloc", module.get());
+
+        // strcpy
+        FunctionType* strcpyType = FunctionType::get(
+            PointerType::get(Type::getInt8Ty(*context), 0),
+            {
+                PointerType::get(Type::getInt8Ty(*context), 0),
+                PointerType::get(Type::getInt8Ty(*context), 0)
+            },
+            false
+        );
+        Function::Create(strcpyType, Function::ExternalLinkage, "strcpy", module.get());
+
+        // strcat
+        FunctionType* strcatType = FunctionType::get(
+            PointerType::get(Type::getInt8Ty(*context), 0),
+            {
+                PointerType::get(Type::getInt8Ty(*context), 0),
+                PointerType::get(Type::getInt8Ty(*context), 0)
+            },
+            false
+        );
+        Function::Create(strcatType, Function::ExternalLinkage, "strcat", module.get());
+
+        // sprintf (für int/bool zu string conversion)
+        FunctionType* sprintfType = FunctionType::get(
+            Type::getInt32Ty(*context),
+            {
+                PointerType::get(Type::getInt8Ty(*context), 0),
+                PointerType::get(Type::getInt8Ty(*context), 0)
+            },
+            true  // varargs
+        );
+        Function::Create(sprintfType, Function::ExternalLinkage, "sprintf", module.get());
+    }
+
     void generate(const Program& program) {
         declarePrintf();
+        declareStringFunctions();
 
         // Step 1: Collect all functions (signatures only)
         for (const auto& stmt : program.statements) {
@@ -2034,20 +2098,34 @@ private:
         Function* function = builder->GetInsertBlock()->getParent();
         IRBuilder<> tmpBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
 
-        Type* type = getType(varDecl->type.empty() ? "int" : varDecl->type);
-        AllocaInst* alloca = tmpBuilder.CreateAlloca(type, nullptr, varDecl->name);
-
+        Type* type = nullptr;
         Value* initValue = nullptr;
+
+        // Generate initializer first if present
         if (varDecl->initializer) {
             initValue = generateExpression(varDecl->initializer.get());
+
+            // If no type specified, infer from initializer
+            if (varDecl->type.empty()) {
+                type = initValue->getType();
+            } else {
+                type = getType(varDecl->type);
+            }
         } else {
+            // No initializer, must have explicit type
+            type = getType(varDecl->type.empty() ? "int" : varDecl->type);
+
             // Default value
-            if (type->isIntegerTy()) {
+            if (type->isIntegerTy(32)) {
                 initValue = ConstantInt::get(*context, APInt(32, 0));
             } else if (type->isIntegerTy(1)) {
                 initValue = ConstantInt::get(*context, APInt(1, 0));
+            } else if (type->isPointerTy()) {
+                initValue = ConstantPointerNull::get(cast<PointerType>(type));
             }
         }
+
+        AllocaInst* alloca = tmpBuilder.CreateAlloca(type, nullptr, varDecl->name);
 
         if (initValue) {
             builder->CreateStore(initValue, alloca);
@@ -2252,9 +2330,53 @@ private:
         return nullptr;
     }
 
+    Value* generateStringConcatenation(BinaryOperation *binOp) {
+        Value* left = generateExpression(binOp->left.get());
+        Value* right = generateExpression(binOp->right.get());
+
+        if (!left || !right) return nullptr;
+
+        // Convert to string if needed
+        left = convertToString(left);
+        right = convertToString(right);
+
+        if (!left || !right) return nullptr;
+
+        // Get string functions
+        Function *strlenFunc = module->getFunction("strlen");
+        Function *mallocFunc = module->getFunction("malloc");
+        Function *strcpyFunc = module->getFunction("strcpy");
+        Function *strcatFunc = module->getFunction("strcat");
+
+        // Calculate total length: len(left) + len(right) + 1
+        Value *len1 = builder->CreateCall(strlenFunc, {left}, "len1");
+        Value *len2 = builder->CreateCall(strlenFunc, {right}, "len2");
+        Value *totalLen = builder->CreateAdd(len1, len2, "totallen");
+        totalLen = builder->CreateAdd(
+            totalLen,
+            ConstantInt::get(*context, APInt(64, 1)),
+            "totallen_plus1"
+        );
+
+        // Allocate memory
+        Value *result = builder->CreateCall(mallocFunc, {totalLen}, "concat_result");
+
+        // Copy first string
+        builder->CreateCall(strcpyFunc, {result, left});
+
+        // Concatenate second string
+        builder->CreateCall(strcatFunc, {result, right});
+
+        return result;
+    }
+
     Value* generateBinaryOp(BinaryOperation* binOp) {
         if (binOp->op == TokenType::AND || binOp->op == TokenType::OR) {
             return generateLogicalOp(binOp);
+        }
+
+        if (binOp->op == TokenType::DOT) {
+            return generateStringConcatenation(binOp);
         }
 
         Value* left = generateExpression(binOp->left.get());
@@ -2470,6 +2592,53 @@ private:
         }
 
         return builder->CreateCall(calleeF, args, "calltmp");
+    }
+
+    // Helper: Convert any value to string
+    Value* convertToString(Value* val) {
+        if (!val) return nullptr;
+
+        // Already a string pointer
+        if (val->getType()->isPointerTy()) {
+            return val;
+        }
+
+        Function* mallocFunc = module->getFunction("malloc");
+        Function* sprintfFunc = module->getFunction("sprintf");
+
+        // Allocate buffer (32 bytes should be enough for int/bool/float)
+        Value* buffer = builder->CreateCall(
+            mallocFunc,
+            {ConstantInt::get(*context, APInt(64, 32))},
+            "str_buffer"
+        );
+
+        if (val->getType()->isIntegerTy(32)) {
+            // Convert int to string
+            Value* format = builder->CreateGlobalStringPtr("%d");
+            builder->CreateCall(sprintfFunc, {buffer, format, val});
+            return buffer;
+        }
+        else if (val->getType()->isIntegerTy(1)) {
+            // Convert bool to string
+            Value* boolAsInt = builder->CreateZExt(val, Type::getInt32Ty(*context));
+            Value* trueStr = builder->CreateGlobalStringPtr("true");
+            Value* falseStr = builder->CreateGlobalStringPtr("false");
+            Value* isTrue = builder->CreateICmpNE(
+                boolAsInt,
+                ConstantInt::get(*context, APInt(32, 0))
+            );
+            return builder->CreateSelect(isTrue, trueStr, falseStr);
+        }
+        else if (val->getType()->isDoubleTy()) {
+            // Convert float to string
+            Value* format = builder->CreateGlobalStringPtr("%.2f");
+            builder->CreateCall(sprintfFunc, {buffer, format, val});
+            return buffer;
+        }
+
+        errs() << "Cannot convert type to string\n";
+        return nullptr;
     }
 };
 
