@@ -1037,6 +1037,7 @@ unordered_map<string, TokenType> Lexer::keywords = {
     {"bool", TokenType::BOOL},
     {"true", TokenType::TRUE},
     {"false", TokenType::FALSE},
+    {"void", TokenType::VOID},
 };
 
 Lexer::Lexer(const string& source) : source(source) {}
@@ -1395,10 +1396,6 @@ bool Lexer::isAlphaNumeric(char c) const {
 // LLVM Code Generator
 // ======================
 
-// ======================
-// LLVM Code Generator
-// ======================
-
 class CodeGenerator {
 public:
     CodeGenerator()
@@ -1416,7 +1413,7 @@ public:
         FunctionType* printfType = FunctionType::get(
             Type::getInt32Ty(*context),
             {PointerType::get(Type::getInt8Ty(*context), 0)},
-            true  // varargs
+            true
         );
 
         Function::Create(
@@ -1443,7 +1440,7 @@ public:
     void writeObjectFile(const string& filename) {
         // Get target triple
         auto targetTriple = sys::getDefaultTargetTriple();
-        module->setTargetTriple(Triple(targetTriple));  // <- FIXED: Wrap in Triple()
+        module->setTargetTriple(Triple(targetTriple));
 
         string error;
         auto target = TargetRegistry::lookupTarget(targetTriple, error);
@@ -1474,7 +1471,7 @@ public:
 
         // Emit object file
         legacy::PassManager pass;
-        auto fileType = CodeGenFileType::ObjectFile;  // <- FIXED: CGFT_ObjectFile -> CodeGenFileType::ObjectFile
+        auto fileType = CodeGenFileType::ObjectFile;
 
         if (machine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
             errs() << "Target machine can't emit object file\n";
@@ -1552,7 +1549,12 @@ private:
         }
 
         // Build function type
-        Type* returnType = getType(funcDecl->returnType);
+        Type* returnType;
+        if (funcDecl->name == "main") {
+            returnType = Type::getInt32Ty(*context);
+        } else {
+            returnType = getType(funcDecl->returnType);
+        }
         FunctionType* funcType = FunctionType::get(returnType, paramTypes, false);
 
         // Create function
@@ -1586,7 +1588,9 @@ private:
 
         // Add default return if missing
         if (!builder->GetInsertBlock()->getTerminator()) {
-            if (returnType->isVoidTy()) {
+            if (funcDecl->name == "main") {
+                builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
+            } else if (returnType->isVoidTy()) {
                 builder->CreateRetVoid();
             } else if (returnType->isIntegerTy()) {
                 builder->CreateRet(ConstantInt::get(*context, APInt(32, 0)));
@@ -1887,8 +1891,8 @@ int main(int argc, char* argv[]) {
     string inputFile = argv[1];
     string outputFile = "output.o";
     string executableFile = "a.out";
-    bool debug = false;  // Debug standardmäßig aus
-    bool run = true;     // Standardmäßig ausführen
+    bool debug = false;
+    bool run = true;
 
     // Parse command line options
     for (int i = 2; i < argc; i++) {
