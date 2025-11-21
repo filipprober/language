@@ -959,7 +959,7 @@ private:
     }
 
     unique_ptr<Expression> parseAssignment() {
-        auto expr = parseComparison();
+        auto expr = parseLogicalOr();
 
         // Check for assignment
         if (match(TokenType::EQUAL)) {
@@ -972,6 +972,30 @@ private:
             string name = var->name;
             auto value = parseAssignment(); // Right associative
             return make_unique<Assignment>(name, std::move(value));
+        }
+
+        return expr;
+    }
+
+    unique_ptr<Expression> parseLogicalOr() {
+        auto expr = parseLogicalAnd();
+
+        while (match(TokenType::OR)) {
+            TokenType op = previous().type;
+            auto right = parseLogicalAnd();
+            expr = make_unique<BinaryOperation>(std::move(expr), op, std::move(right));
+        }
+
+        return expr;
+    }
+
+    unique_ptr<Expression> parseLogicalAnd() {
+        auto expr = parseComparison();
+
+        while (match(TokenType::AND)) {
+            TokenType op = previous().type;
+            auto right = parseComparison();
+            expr = make_unique<BinaryOperation>(std::move(expr), op, std::move(right));
         }
 
         return expr;
@@ -1303,6 +1327,8 @@ unordered_map<string, TokenType> Lexer::keywords = {
     {"true", TokenType::TRUE},
     {"false", TokenType::FALSE},
     {"void", TokenType::VOID},
+    {"and", TokenType::AND},
+    {"or", TokenType::OR},
 };
 
 Lexer::Lexer(const string& source, ExceptionReporter& reporter) : source(source), reporter(reporter) {}
@@ -1406,6 +1432,20 @@ void Lexer::scanToken() {
                 addToken(TokenType::MINUS_EQUAL, "-=");
             } else {
                 addToken(TokenType::MINUS, "-");
+            }
+            break;
+
+        case '&':
+            if (peek() == '&') {
+                advance();
+                addToken(TokenType::AND, "&&");
+            }
+            break;
+
+        case '|':
+            if (peek() == '|') {
+                advance();
+                addToken(TokenType::OR, "||");
             }
             break;
 
@@ -2213,6 +2253,10 @@ private:
     }
 
     Value* generateBinaryOp(BinaryOperation* binOp) {
+        if (binOp->op == TokenType::AND || binOp->op == TokenType::OR) {
+            return generateLogicalOp(binOp);
+        }
+
         Value* left = generateExpression(binOp->left.get());
         Value* right = generateExpression(binOp->right.get());
 
@@ -2268,6 +2312,71 @@ private:
                 return nullptr;
         }
         return nullptr;
+    }
+
+    Value *generateLogicalOp(BinaryOperation *binOp) {
+        Function *function = builder->GetInsertBlock()->getParent();
+
+        // Evaluate left side
+        Value *left = generateExpression(binOp->left.get());
+        if (!left) return nullptr;
+
+        // Convert to i1 if needed
+        if (!left->getType()->isIntegerTy(1)) {
+            left = builder->CreateICmpNE(
+                left,
+                ConstantInt::get(*context, APInt(32, 0)),
+                "tobool"
+            );
+        }
+
+        BasicBlock *startBB = builder->GetInsertBlock();
+        BasicBlock *rightBB = BasicBlock::Create(*context, "logical_right");
+        BasicBlock *mergeBB = BasicBlock::Create(*context, "logical_merge");
+
+        if (binOp->op == TokenType::AND) {
+            // AND: only evaluate right if left is true
+            builder->CreateCondBr(left, rightBB, mergeBB);
+        } else {
+            // OR: only evaluate right if left is false
+            builder->CreateCondBr(left, mergeBB, rightBB);
+        }
+
+        // Right block
+        function->insert(function->end(), rightBB);
+        builder->SetInsertPoint(rightBB);
+        Value *right = generateExpression(binOp->right.get());
+        if (!right) return nullptr;
+
+        // Convert to i1 if needed
+        if (!right->getType()->isIntegerTy(1)) {
+            right = builder->CreateICmpNE(
+                right,
+                ConstantInt::get(*context, APInt(32, 0)),
+                "tobool"
+            );
+        }
+
+        BasicBlock *rightEndBB = builder->GetInsertBlock();
+        builder->CreateBr(mergeBB);
+
+        // Merge block
+        function->insert(function->end(), mergeBB);
+        builder->SetInsertPoint(mergeBB);
+
+        PHINode *phi = builder->CreatePHI(Type::getInt1Ty(*context), 2, "logical_result");
+
+        if (binOp->op == TokenType::AND) {
+            // AND: false from start, or result from right
+            phi->addIncoming(ConstantInt::getFalse(*context), startBB);
+            phi->addIncoming(right, rightEndBB);
+        } else {
+            // OR: true from start, or result from right
+            phi->addIncoming(ConstantInt::getTrue(*context), startBB);
+            phi->addIncoming(right, rightEndBB);
+        }
+
+        return phi;
     }
 
     Value* generatePrint(FunctionCall* call) {
