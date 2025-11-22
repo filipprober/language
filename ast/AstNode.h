@@ -48,140 +48,19 @@ public:
 
     static shared_ptr<MyType> Int();
     static shared_ptr<MyType> Bool();
+    static shared_ptr<MyType> Float();
+    static shared_ptr<MyType> String();
+    static shared_ptr<MyType> Void();
+    static shared_ptr<MyType> Null();
+    static shared_ptr<MyType> Array(shared_ptr<MyType> elem);
+    static shared_ptr<MyType> Optional(shared_ptr<MyType> elem);
 
-    static shared_ptr<MyType> Float() {
-        static auto t = make_shared<MyType>(TypeKind::Float);
-        return t;
-    }
-
-    static shared_ptr<MyType> String() {
-        static auto t = make_shared<MyType>(TypeKind::String);
-        return t;
-    }
-
-    static shared_ptr<MyType> Void() {
-        static auto t = make_shared<MyType>(TypeKind::Void);
-        return t;
-    }
-
-    static shared_ptr<MyType> Null() {
-        static auto t = make_shared<MyType>(TypeKind::Null);
-        return t;
-    }
-
-    static shared_ptr<MyType> Array(shared_ptr<MyType> elem) {
-        auto t = make_shared<MyType>(TypeKind::Array);
-        t->elementType = elem;
-        return t;
-    }
-
-    static shared_ptr<MyType> Optional(shared_ptr<MyType> elem) {
-        auto t = make_shared<MyType>(TypeKind::Optional);
-        t->elementType = elem;
-        return t;
-    }
-
-    static shared_ptr<MyType> parse(const string& typeStr) {
-        if (typeStr.empty() || typeStr == "void") {
-            return Void();
-        }
-
-        // Optional: int?
-        if (typeStr.back() == '?') {
-            string base = typeStr.substr(0, typeStr.length() - 1);
-            return Optional(parse(base));
-        }
-
-        // Array: int[]
-        if (typeStr.length() > 2 && typeStr.substr(typeStr.length() - 2) == "[]") {
-            string base = typeStr.substr(0, typeStr.length() - 2);
-            return Array(parse(base));
-        }
-
-        if (typeStr == "int") return Int();
-        if (typeStr == "bool") return Bool();
-        if (typeStr == "float") return Float();
-        if (typeStr == "string") return String();
-
-        return make_shared<MyType>(TypeKind::Unknown);
-    }
-
-    string toString() const {
-        switch (kind) {
-            case TypeKind::Int: return "int";
-            case TypeKind::Bool: return "bool";
-            case TypeKind::Float: return "float";
-            case TypeKind::String: return "string";
-            case TypeKind::Void: return "void";
-            case TypeKind::Null: return "null";
-            case TypeKind::Array:
-                return elementType->toString() + "[]";
-            case TypeKind::Optional:
-                return elementType->toString() + "?";
-            default: return "unknown";
-        }
-    }
-
-    bool equals(const shared_ptr<MyType>& other) const {
-        if (!other) return false;
-        if (kind != other->kind) return false;
-
-        if (kind == TypeKind::Array || kind == TypeKind::Optional) {
-            return elementType && other->elementType &&
-                   elementType->equals(other->elementType);
-        }
-        return true;
-    }
-
-    bool isNumeric() const {
-        return kind == TypeKind::Int || kind == TypeKind::Float;
-    }
-
-    bool canAssignFrom(const shared_ptr<MyType>& other) const {
-        if (equals(other)) return true;
-
-        if (kind == TypeKind::Optional && other->kind == TypeKind::Null) {
-            return true;
-        }
-
-        if (kind == TypeKind::Optional && elementType) {
-            return elementType->equals(other);
-        }
-
-        return false;
-    }
-
-    llvm::Type* toLLVMType(LLVMContext& context) const {
-        switch (kind) {
-            case TypeKind::Int:
-                return llvm::Type::getInt32Ty(context);
-            case TypeKind::Bool:
-                return llvm::Type::getInt1Ty(context);
-            case TypeKind::Float:
-                return llvm::Type::getDoubleTy(context);
-            case TypeKind::String:
-                return PointerType::get(llvm::Type::getInt8Ty(context), 0);
-            case TypeKind::Void:
-                return llvm::Type::getVoidTy(context);
-            case TypeKind::Optional:
-                if (elementType) {
-                    return PointerType::get(elementType->toLLVMType(context), 0);
-                }
-                return PointerType::getUnqual(context);
-            case TypeKind::Array: {
-                if (elementType) {
-                    vector<llvm::Type*> fields = {
-                        llvm::Type::getInt32Ty(context),
-                        PointerType::get(elementType->toLLVMType(context), 0)
-                    };
-                    return StructType::create(context, fields, "array_" + elementType->toString());
-                }
-                return llvm::Type::getInt32Ty(context);
-            }
-            default:
-                return llvm::Type::getInt32Ty(context);
-        }
-    }
+    static shared_ptr<MyType> parse(const string& typeStr);
+    string toString() const;
+    bool equals(const shared_ptr<MyType>& other) const;
+    bool isNumeric() const;
+    bool canAssignFrom(const shared_ptr<MyType>& other) const;
+    llvm::Type* toLLVMType(LLVMContext& context) const;
 };
 
 inline shared_ptr<MyType> MyType::Int() {
@@ -192,6 +71,140 @@ inline shared_ptr<MyType> MyType::Int() {
 inline shared_ptr<MyType> MyType::Bool() {
     static auto t = make_shared<MyType>(TypeKind::Bool);
     return t;
+}
+
+inline shared_ptr<MyType> MyType::Float() {
+    static auto t = make_shared<MyType>(TypeKind::Float);
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::String() {
+    static auto t = make_shared<MyType>(TypeKind::String);
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::Void() {
+    static auto t = make_shared<MyType>(TypeKind::Void);
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::Null() {
+    static auto t = make_shared<MyType>(TypeKind::Null);
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::Array(shared_ptr<MyType> elem) {
+    auto t = make_shared<MyType>(TypeKind::Array);
+    t->elementType = elem;
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::Optional(shared_ptr<MyType> elem) {
+    auto t = make_shared<MyType>(TypeKind::Optional);
+    t->elementType = elem;
+    return t;
+}
+
+inline shared_ptr<MyType> MyType::parse(const string& typeStr) {
+    if (typeStr.empty() || typeStr == "void") {
+        return Void();
+    }
+
+    // Optional: int?
+    if (typeStr.back() == '?') {
+        string base = typeStr.substr(0, typeStr.length() - 1);
+        return Optional(parse(base));
+    }
+
+    // Array: int[]
+    if (typeStr.length() > 2 && typeStr.substr(typeStr.length() - 2) == "[]") {
+        string base = typeStr.substr(0, typeStr.length() - 2);
+        return Array(parse(base));
+    }
+
+    if (typeStr == "int") return Int();
+    if (typeStr == "bool") return Bool();
+    if (typeStr == "float") return Float();
+    if (typeStr == "string") return String();
+
+    return make_shared<MyType>(TypeKind::Unknown);
+}
+
+inline string MyType::toString() const {
+    switch (kind) {
+        case TypeKind::Int: return "int";
+        case TypeKind::Bool: return "bool";
+        case TypeKind::Float: return "float";
+        case TypeKind::String: return "string";
+        case TypeKind::Void: return "void";
+        case TypeKind::Null: return "null";
+        case TypeKind::Array:
+            return elementType->toString() + "[]";
+        case TypeKind::Optional:
+            return elementType->toString() + "?";
+        default: return "unknown";
+    }
+}
+
+inline bool MyType::equals(const shared_ptr<MyType>& other) const {
+    if (!other) return false;
+    if (kind != other->kind) return false;
+
+    if (kind == TypeKind::Array || kind == TypeKind::Optional) {
+        return elementType && other->elementType &&
+               elementType->equals(other->elementType);
+    }
+    return true;
+}
+
+inline bool MyType::isNumeric() const {
+    return kind == TypeKind::Int || kind == TypeKind::Float;
+}
+
+inline bool MyType::canAssignFrom(const shared_ptr<MyType>& other) const {
+    if (equals(other)) return true;
+
+    if (kind == TypeKind::Optional && other->kind == TypeKind::Null) {
+        return true;
+    }
+
+    if (kind == TypeKind::Optional && elementType) {
+        return elementType->equals(other);
+    }
+
+    return false;
+}
+
+inline llvm::Type* MyType::toLLVMType(LLVMContext& context) const {
+    switch (kind) {
+        case TypeKind::Int:
+            return llvm::Type::getInt32Ty(context);
+        case TypeKind::Bool:
+            return llvm::Type::getInt1Ty(context);
+        case TypeKind::Float:
+            return llvm::Type::getDoubleTy(context);
+        case TypeKind::String:
+            return PointerType::get(llvm::Type::getInt8Ty(context), 0);
+        case TypeKind::Void:
+            return llvm::Type::getVoidTy(context);
+        case TypeKind::Optional:
+            if (elementType) {
+                return PointerType::get(elementType->toLLVMType(context), 0);
+            }
+            return PointerType::getUnqual(context);
+        case TypeKind::Array: {
+            if (elementType) {
+                vector<llvm::Type*> fields = {
+                    llvm::Type::getInt32Ty(context),
+                    PointerType::get(elementType->toLLVMType(context), 0)
+                };
+                return StructType::create(context, fields, "array_" + elementType->toString());
+            }
+            return llvm::Type::getInt32Ty(context);
+        }
+        default:
+            return llvm::Type::getInt32Ty(context);
+    }
 }
 
 class ASTNode
@@ -224,9 +237,7 @@ public:
         exprType = MyType::Int();
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "IntLiteral(" << value << ")" << endl;
-    }
+    void print(int indent = 0) const override;
 };
 
 class MyStringLiteral : public Expression {
@@ -237,10 +248,9 @@ public:
         exprType = MyType::String();
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "StringLiteral(" << value << ")" << endl;
-    }
+    void print(int indent = 0) const override;
 };
+
 
 class InterpolatedString : public Expression {
 public:
@@ -253,13 +263,7 @@ public:
         exprType = MyType::String();
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "InterpolatedString(\"" << template_str << "\")" << endl;
-
-        for (const auto& var : variables) {
-            cout << string(indent + 2, ' ') << "Variable: " << var << endl;
-        }
-    }
+    void print(int indent = 0) const override;
 };
 
 class BoolLiteral : public Expression {
@@ -270,9 +274,7 @@ public:
         exprType = MyType::Bool();
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "BoolLiteral(" << (value ? "true" : "false") << ")" << endl;
-    }
+    void print(int indent = 0) const override;
 };
 
 class NullLiteral : public Expression {
@@ -281,25 +283,22 @@ public:
         exprType = MyType::Null();
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "NullLiteral(null)" << endl;
-    }
+    void print(int indent = 0) const override;
 };
+
+
 
 class Variable : public Expression {
 public:
     string name;
 
-    explicit Variable(const string& name) : name(name) {
-        // Type wird später vom TypeChecker gesetzt
-    }
+    explicit Variable(const string& name) : name(name) {}
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "Variable(" << name << ")" << endl;
-    }
+    void print(int indent = 0) const override;
 };
 
-class BinaryOperation : public Expression {
+class BinaryOperation : public Expression
+{
 public:
     unique_ptr<Expression> left;
     TokenType op;
@@ -308,16 +307,11 @@ public:
     BinaryOperation(unique_ptr<Expression> left, TokenType op, unique_ptr<Expression> right) :
         left(std::move(left)),
         op(op),
-        right(std::move(right)) {
-        // Type wird später gesetzt
-    }
+        right(std::move(right)) {}
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "BinaryOperation(" << tokenTypeToString(op) << ")" << endl;
-        left->print(indent + 2);
-        right->print(indent + 2);
-    }
+    void print(int indent = 0) const override;
 };
+
 
 class Assignment : public Expression
 {
@@ -330,10 +324,7 @@ public:
         value(std::move(value)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "Assignment(" << name << ")" << endl;
-        value->print(indent + 2);
-    }
+    void print(int indent = 0) const override;
 };
 
 class UnaryOperation : public Expression {
@@ -346,10 +337,7 @@ public:
         operand(std::move(operand)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "UnaryOperation(" << tokenTypeToString(op) << ")" << endl;
-        operand->print(indent + 2);
-    }
+    void print(int indent = 0) const override;
 };
 
 // ======================
@@ -360,7 +348,7 @@ class VariableDeclaration : public Statement {
 public:
     string name;
     string typeStr;
-    shared_ptr<MyType> resolvedType;  // UPDATED: Resolved type
+    shared_ptr<MyType> resolvedType;
     unique_ptr<Expression> initializer;
 
     VariableDeclaration(const string& name, const string& type, unique_ptr<Expression> initializer) :
@@ -369,16 +357,7 @@ public:
         initializer(std::move(initializer)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "VariableDeclaration(name=" << name;
-        if (!typeStr.empty()) {
-            cout << ", type=" << typeStr;
-        }
-        cout << ")" << endl;
-        if (initializer) {
-            initializer->print(indent + 2);
-        }
-    }
+    void print(int indent = 0) const override;
 };
 
 class ReturnStatement : public Statement {
@@ -388,12 +367,7 @@ public:
     explicit ReturnStatement(unique_ptr<Expression> value) :
         value(std::move(value)) {}
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "ReturnStatement" << endl;
-        if (value) {
-            value->print(indent + 2);
-        }
-    }
+    void print(int indent = 0) const override;
 };
 
 class ExpressionStatement : public Statement {
@@ -403,8 +377,80 @@ public:
     explicit ExpressionStatement(unique_ptr<Expression> expression) :
         expression(std::move(expression)) {}
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "ExpressionStatement" << endl;
-        expression->print(indent + 2);
-    }
+    void print(int indent = 0) const override;
 };
+
+inline void Variable::print(int indent) const {
+    cout << string(indent, ' ') << "Variable(" << name << ")" << endl;
+}
+
+inline void BinaryOperation::print(int indent) const {
+    cout << string(indent, ' ') << "BinaryOperation(" << tokenTypeToString(op) << ")" << endl;
+    left->print(indent + 2);
+    right->print(indent + 2);
+}
+
+inline void Assignment::print(int indent) const {
+    cout << string(indent, ' ') << "Assignment(" << name << ")" << endl;
+    value->print(indent + 2);
+}
+
+inline void UnaryOperation::print(int indent) const {
+    cout << string(indent, ' ') << "UnaryOperation(" << tokenTypeToString(op) << ")" << endl;
+    operand->print(indent + 2);
+}
+
+// ======================
+// Statements
+// ======================
+
+inline void VariableDeclaration::print(int indent) const {
+    cout << string(indent, ' ') << "VariableDeclaration(name=" << name;
+    if (!typeStr.empty()) {
+        cout << ", type=" << typeStr;
+    }
+    cout << ")" << endl;
+    if (initializer) {
+        initializer->print(indent + 2);
+    }
+}
+
+inline void ReturnStatement::print(int indent) const {
+    cout << string(indent, ' ') << "ReturnStatement" << endl;
+    if (value) {
+        value->print(indent + 2);
+    }
+}
+
+inline void ExpressionStatement::print(int indent) const {
+    cout << string(indent, ' ') << "ExpressionStatement" << endl;
+    expression->print(indent + 2);
+}
+
+// ======================
+// Literals
+// ======================
+
+inline void IntLiteral::print(int indent) const {
+    cout << string(indent, ' ') << "IntLiteral(" << value << ")" << endl;
+}
+
+inline void MyStringLiteral::print(int indent) const {
+    cout << string(indent, ' ') << "StringLiteral(" << value << ")" << endl;
+}
+
+inline void InterpolatedString::print(int indent) const {
+    cout << string(indent, ' ') << "InterpolatedString(\"" << template_str << "\")" << endl;
+
+    for (const auto& var : variables) {
+        cout << string(indent + 2, ' ') << "Variable: " << var << endl;
+    }
+}
+
+inline void BoolLiteral::print(int indent) const {
+    cout << string(indent, ' ') << "BoolLiteral(" << (value ? "true" : "false") << ")" << endl;
+}
+
+inline void NullLiteral::print(int indent) const {
+    cout << string(indent, ' ') << "NullLiteral(null)" << endl;
+}

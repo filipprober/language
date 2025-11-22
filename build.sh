@@ -32,7 +32,8 @@ echo "Using LLVM version: $($LLVM_CONFIG --version)"
     -L$HOMEBREW_LIB \
     -fexceptions -frtti \
     -Wno-deprecated-declarations \
-    -o mylang main.cpp \
+    -o mylang \
+    main.cpp \
     $($LLVM_CONFIG --libs core support irreader aarch64asmparser aarch64codegen aarch64desc aarch64disassembler aarch64info aarch64utils) \
     $($LLVM_CONFIG --system-libs) \
     -lz -lzstd
