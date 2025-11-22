@@ -34,14 +34,21 @@ enum class TypeKind {
     Null,
     Array,
     Optional,
+    Class,
     Unknown
 };
 
+enum class Visibility {
+    Public,
+    Private,
+    Protected
+};
 
 class MyType {
 public:
     TypeKind kind;
-    shared_ptr<MyType> elementType;  // Für Arrays und Optional
+    shared_ptr<MyType> elementType;
+    string className;
 
     // Public constructor für make_shared
     explicit MyType(TypeKind k) : kind(k), elementType(nullptr) {}
@@ -54,6 +61,7 @@ public:
     static shared_ptr<MyType> Null();
     static shared_ptr<MyType> Array(shared_ptr<MyType> elem);
     static shared_ptr<MyType> Optional(shared_ptr<MyType> elem);
+    static shared_ptr<MyType> Class(const string& name);
 
     static shared_ptr<MyType> parse(const string& typeStr);
     string toString() const;
@@ -105,6 +113,12 @@ inline shared_ptr<MyType> MyType::Optional(shared_ptr<MyType> elem) {
     return t;
 }
 
+inline shared_ptr<MyType> MyType::Class(const string& name) {
+    auto t = make_shared<MyType>(TypeKind::Class);
+    t->className = name;
+    return t;
+}
+
 inline shared_ptr<MyType> MyType::parse(const string& typeStr) {
     if (typeStr.empty() || typeStr == "void") {
         return Void();
@@ -127,7 +141,7 @@ inline shared_ptr<MyType> MyType::parse(const string& typeStr) {
     if (typeStr == "float") return Float();
     if (typeStr == "string") return String();
 
-    return make_shared<MyType>(TypeKind::Unknown);
+    return Class(typeStr);
 }
 
 inline string MyType::toString() const {
@@ -138,6 +152,7 @@ inline string MyType::toString() const {
         case TypeKind::String: return "string";
         case TypeKind::Void: return "void";
         case TypeKind::Null: return "null";
+        case TypeKind::Class: return className;
         case TypeKind::Array:
             return elementType->toString() + "[]";
         case TypeKind::Optional:
@@ -149,6 +164,10 @@ inline string MyType::toString() const {
 inline bool MyType::equals(const shared_ptr<MyType>& other) const {
     if (!other) return false;
     if (kind != other->kind) return false;
+
+    if (kind == TypeKind::Class) {
+        return className == other->className;
+    }
 
     if (kind == TypeKind::Array || kind == TypeKind::Optional) {
         return elementType && other->elementType &&
@@ -191,6 +210,8 @@ inline llvm::Type* MyType::toLLVMType(LLVMContext& context) const {
             if (elementType) {
                 return PointerType::get(elementType->toLLVMType(context), 0);
             }
+            return PointerType::getUnqual(context);
+        case TypeKind::Class:
             return PointerType::getUnqual(context);
         case TypeKind::Array: {
             if (elementType) {
@@ -516,6 +537,192 @@ public:
     }
 };
 
+class PropertyDeclaration
+{
+public:
+    string name;
+    string typeStr;
+    shared_ptr<MyType> resolvedType;
+    unique_ptr<Expression> initializer;
+    Visibility visibility;
+
+    PropertyDeclaration(
+        const string& name,
+        const string& type,
+        unique_ptr<Expression> initializer,
+        Visibility visibility = Visibility::Public
+    ) : name(name),
+        typeStr(type),
+        initializer(std::move(initializer)),
+        visibility(visibility) {
+        //
+    }
+
+    void print(int indent = 0) const;
+};
+
+class MethodDeclaration
+{
+public:
+    string name;
+    vector<Parameter> parameters;
+    string returnTypeStr;
+    shared_ptr<MyType> resolvedReturnType;
+    vector<unique_ptr<Statement>> body;
+    Visibility visibility;
+    bool isStatic;
+    bool isAbstract;
+
+    MethodDeclaration(const string& name, vector<Parameter> parameters, const string& returnType,
+                      vector<unique_ptr<Statement>> body,
+                      Visibility visibility = Visibility::Public,
+                      bool isStatic = false,
+                      bool isAbstract = false) :
+        name(name),
+        parameters(std::move(parameters)),
+        returnTypeStr(returnType),
+        resolvedReturnType(MyType::parse(returnType)),
+        body(std::move(body)),
+        visibility(visibility),
+        isStatic(isStatic),
+        isAbstract(isAbstract) {
+
+    }
+
+    void print(int indent = 0) const;
+};
+
+class ConstructorDeclaration
+{
+public:
+    vector<Parameter> parameters;
+    vector<unique_ptr<Statement>> body;
+    Visibility visibility;
+    bool hasSuper;
+    vector<unique_ptr<Expression>> superArgs;
+
+    ConstructorDeclaration(vector<Parameter> parameters, vector<unique_ptr<Statement>> body, Visibility visibility = Visibility::Public) :
+        parameters(std::move(parameters)),
+        body(std::move(body)),
+        visibility(visibility),
+        hasSuper(false) {
+    }
+
+    void print(int indent = 0) const;
+};
+
+class ClassDeclaration : public Statement
+{
+public:
+    string name;
+    string baseClass;
+    vector<string> interfaces;
+    vector<string> traits;
+    bool isAbstract;
+
+    vector<PropertyDeclaration> properties;
+    vector<unique_ptr<MethodDeclaration>> methods;
+    vector<unique_ptr<ConstructorDeclaration>> constructors;
+
+    ClassDeclaration(const string& name, const string& baseClass = "",
+                    bool isAbstract = false)
+        : name(name), baseClass(baseClass), isAbstract(isAbstract) {}
+
+    void print(int indent = 0) const override;
+};
+
+class InterfaceDeclaration : public Statement
+{
+public:
+    string name;
+    vector<unique_ptr<MethodDeclaration>> methods;
+
+    InterfaceDeclaration(const string& name) : name(name) {}
+
+    void print(int indent = 0) const override;
+};
+
+class TraitDeclaration : public Statement
+{
+public:
+    string name;
+    vector<PropertyDeclaration> properties;
+    vector<unique_ptr<MethodDeclaration>> methods;
+
+    TraitDeclaration(const string& name) : name(name) {}
+
+    void print(int indent = 0) const override;
+};
+
+class NewExpression : public Expression
+{
+public:
+    string className;
+    vector<unique_ptr<Expression>> arguments;
+
+    NewExpression(const string& className, vector<unique_ptr<Expression>> arguments) :
+        className(className),
+        arguments(std::move(arguments)) {
+        exprType = MyType::Class(className);
+    }
+
+    void print(int indent = 0) const override;
+};
+
+// (object.property)
+class MemberAccess : public Expression
+{
+public:
+    unique_ptr<Expression> object;
+    string memberName;
+
+    MemberAccess(unique_ptr<Expression> object, const string& memberName) :
+        object(std::move(object)),
+        memberName(memberName) {
+        //
+    }
+
+    void print(int indent = 0) const override;
+};
+
+class MethodCall : public Expression {
+public:
+    unique_ptr<Expression> object;
+    string methodName;
+    vector<unique_ptr<Expression>> arguments;
+
+    MethodCall(unique_ptr<Expression> obj, const string& method,
+               vector<unique_ptr<Expression>> args)
+        : object(std::move(obj)), methodName(method), arguments(std::move(args)) {}
+
+    void print(int indent = 0) const override;
+};
+
+class ThisExpression : public Expression
+{
+public:
+    ThisExpression() {}
+
+    void print(int indent = 0) const override;
+};
+
+class SuperExpression : public Expression {
+public:
+    SuperExpression() {}
+
+    void print(int indent = 0) const override;
+};
+
+class SuperCall : public Expression {
+public:
+    vector<unique_ptr<Expression>> arguments;
+
+    SuperCall(vector<unique_ptr<Expression>> args)
+        : arguments(std::move(args)) {}
+
+    void print(int indent = 0) const override;
+};
+
 class Program : public ASTNode {
 public:
     vector<unique_ptr<Statement>> statements;
@@ -528,6 +735,180 @@ public:
         }
     }
 };
+
+inline void SuperCall::print(int indent) const {
+    cout << string(indent, ' ') << "super(";
+    for (size_t i = 0; i < arguments.size(); i++) {
+        if (i > 0) cout << ", ";
+        cout << "arg" << i;
+    }
+    cout << ")" << endl;
+
+    for (const auto& arg : arguments) {
+        arg->print(indent + 2);
+    }
+}
+
+inline void SuperExpression::print(int indent) const {
+    cout << string(indent, ' ') << "super" << endl;
+}
+
+inline void ThisExpression::print(int indent) const {
+    cout << string(indent, ' ') << "this" << endl;
+}
+
+inline void MethodCall::print(int indent) const {
+    cout << string(indent, ' ') << "MethodCall(." << methodName << ")" << endl;
+    cout << string(indent + 2, ' ') << "Object:" << endl;
+    object->print(indent + 4);
+
+    if (!arguments.empty()) {
+        cout << string(indent + 2, ' ') << "Arguments:" << endl;
+        for (const auto& arg : arguments) {
+            arg->print(indent + 4);
+        }
+    }
+}
+
+inline void MemberAccess::print(int indent) const {
+    cout << string(indent, ' ') << "MemberAccess(." << memberName << ")" << endl;
+    object->print(indent + 2);
+}
+
+inline void NewExpression::print(int indent) const {
+    cout << string(indent, ' ') << "new " << className << "(";
+    for (size_t i = 0; i < arguments.size(); i++) {
+        if (i > 0) cout << ", ";
+        cout << "arg" << i;
+    }
+    cout << ")" << endl;
+
+    for (const auto& arg : arguments) {
+        arg->print(indent + 2);
+    }
+}
+
+inline void TraitDeclaration::print(int indent) const {
+    cout << string(indent, ' ') << "trait " << name << ":" << endl;
+
+    if (!properties.empty()) {
+        for (const auto& prop : properties) {
+            prop.print(indent + 2);
+        }
+    }
+
+    for (const auto& method : methods) {
+        method->print(indent + 2);
+    }
+}
+
+inline void InterfaceDeclaration::print(int indent) const {
+    cout << string(indent, ' ') << "interface " << name << ":" << endl;
+    for (const auto& method : methods) {
+        method->print(indent + 2);
+    }
+}
+
+inline void ClassDeclaration::print(int indent) const {
+    cout << string(indent, ' ');
+    if (isAbstract) cout << "abstract ";
+    cout << "class " << name;
+
+    if (!baseClass.empty()) {
+        cout << " extends " << baseClass;
+    }
+
+    if (!interfaces.empty()) {
+        cout << " implements ";
+        for (size_t i = 0; i < interfaces.size(); i++) {
+            if (i > 0) cout << ", ";
+            cout << interfaces[i];
+        }
+    }
+
+    if (!traits.empty()) {
+        cout << " use ";
+        for (size_t i = 0; i < traits.size(); i++) {
+            if (i > 0) cout << ", ";
+            cout << traits[i];
+        }
+    }
+
+    cout << ":" << endl;
+
+    // Properties
+    if (!properties.empty()) {
+        for (const auto& prop : properties) {
+            prop.print(indent + 2);
+        }
+    }
+
+    // Constructors
+    if (!constructors.empty()) {
+        cout << string(indent + 2, ' ') << "# Constructors:" << endl;
+        for (const auto& ctor : constructors) {
+            ctor->print(indent + 2);
+        }
+    }
+
+    // Methods
+    if (!methods.empty()) {
+        cout << string(indent + 2, ' ') << "# Methods:" << endl;
+        for (const auto& method : methods) {
+            method->print(indent + 2);
+        }
+    }
+}
+
+inline void ConstructorDeclaration::print(int indent) const {
+    string vis = visibility == Visibility::Public ? "public" : "private";
+    cout << string(indent, ' ') << vis << " init(";
+    for (size_t i = 0; i < parameters.size(); i++) {
+        if (i > 0) cout << ", ";
+        cout << parameters[i].name << ": " << parameters[i].typeStr;
+    }
+    cout << "):" << endl;
+
+    if (hasSuper) {
+        cout << string(indent + 2, ' ') << "super(...)" << endl;
+    }
+
+    for (const auto& statement : body) {
+        statement->print(indent + 2);
+    }
+}
+
+inline void MethodDeclaration::print(int indent) const {
+    string vis = visibility == Visibility::Public ? "public" :
+                     visibility == Visibility::Protected ? "protected" : "private";
+    cout << string(indent, ' ') << vis << " ";
+    if (isStatic) cout << "const ";
+    if (isAbstract) cout << "abstract ";
+    cout << "fn " << name << "(";
+
+    for (size_t i = 0; i < parameters.size(); i++) {
+        if (i > 0) cout << ", ";
+        cout << parameters[i].name << ": " << parameters[i].typeStr;
+    }
+    cout << ")";
+
+    if (!returnTypeStr.empty() && returnTypeStr != "void") {
+        cout << " -> " << returnTypeStr;
+    }
+    cout << ":" << endl;
+
+    if (!isAbstract) {
+        for (const auto& statement : body) {
+            statement->print(indent + 2);
+        }
+    }
+}
+
+inline void PropertyDeclaration::print(int indent) const {
+    string vis = visibility == Visibility::Public ? "public" :
+                     visibility == Visibility::Protected ? "protected" : "private";
+    cout << string(indent, ' ') << vis << " var " << name << ": " << typeStr << endl;
+}
 
 inline void Variable::print(int indent) const {
     cout << string(indent, ' ') << "Variable(" << name << ")" << endl;

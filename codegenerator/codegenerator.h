@@ -133,14 +133,209 @@ public:
         declareStringFunctions();
 
         for (const auto& stmt : program.statements) {
-            if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+            if (auto* classDecl = dynamic_cast<ClassDeclaration*>(stmt.get())) {
+                declareClass(classDecl);
+            }
+        }
+
+        for (const auto &stmt: program.statements) {
+            if (auto *funcDecl = dynamic_cast<FunctionDeclaration *>(stmt.get())) {
                 declareFunction(funcDecl);
             }
         }
 
-        for (const auto& stmt : program.statements) {
+        for (const auto &stmt: program.statements) {
             generateStatement(stmt.get());
         }
+    }
+
+    void declareClass(ClassDeclaration *classDecl) {
+        // Erstelle leeren Struct (wir haben keine Properties)
+        vector<llvm::Type *> memberTypes;
+
+        StructType *classStruct = StructType::create(*context, memberTypes, classDecl->name);
+        classTypes[classDecl->name] = classStruct;
+        classDecls[classDecl->name] = classDecl;
+
+        // Declare Constructor
+        if (!classDecl->constructors.empty()) {
+            for (const auto &ctor: classDecl->constructors) {
+                declareConstructor(classDecl, ctor.get());
+            }
+        }
+
+        for (const auto& method : classDecl->methods) {
+            declareMethod(classDecl, method.get());
+        }
+    }
+
+    void declareMethod(ClassDeclaration* classDecl, MethodDeclaration* method) {
+        // Methode hat als ersten Parameter immer 'this' (Pointer auf Klassen-Instanz)
+        vector<llvm::Type*> paramTypes;
+
+        if (!method->isStatic) {
+            paramTypes.push_back(PointerType::get(classTypes[classDecl->name], 0));
+        }
+
+        for (const auto& param : method->parameters) {
+            paramTypes.push_back(param.resolvedType->toLLVMType(*context));
+        }
+
+        llvm::Type* returnType = method->resolvedReturnType->toLLVMType(*context);
+        FunctionType* methodType = FunctionType::get(returnType, paramTypes, false);
+
+        string methodName = classDecl->name + "_" + method->name;
+        Function* methodFunc = Function::Create(
+            methodType,
+            Function::ExternalLinkage,
+            methodName,
+            module.get()
+        );
+
+        functions[methodName] = methodFunc;
+    }
+
+    void declareConstructor(ClassDeclaration *classDecl, ConstructorDeclaration *ctor) {
+        // Constructor Parameter
+        vector<llvm::Type *> paramTypes;
+        for (const auto &param: ctor->parameters) {
+            paramTypes.push_back(param.resolvedType->toLLVMType(*context));
+        }
+
+        // Constructor gibt Pointer auf Klassen-Instanz zurück
+        llvm::Type *returnType = PointerType::get(classTypes[classDecl->name], 0);
+        FunctionType *ctorType = FunctionType::get(returnType, paramTypes, false);
+
+        string ctorName = classDecl->name + "_init";
+        Function *ctorFunc = Function::Create(
+            ctorType,
+            Function::ExternalLinkage,
+            ctorName,
+            module.get()
+        );
+
+        functions[ctorName] = ctorFunc;
+    }
+
+    void generateClass(ClassDeclaration *classDecl) {
+        currentClass = classDecl;
+
+        // Generate Constructors
+        for (const auto &ctor: classDecl->constructors) {
+            generateConstructor(classDecl, ctor.get());
+        }
+
+        for (const auto& method : classDecl->methods) {
+            generateMethod(classDecl, method.get());
+        }
+
+        currentClass = nullptr;
+    }
+
+    void generateMethod(ClassDeclaration* classDecl, MethodDeclaration* method) {
+        string methodName = classDecl->name + "_" + method->name;
+        Function* methodFunc = functions[methodName];
+
+        BasicBlock* entryBlock = BasicBlock::Create(*context, "entry", methodFunc);
+        builder->SetInsertPoint(entryBlock);
+
+        // Setup Parameters
+        int argIndex = 0;
+
+        if (!method->isStatic) {
+            // Erster Parameter ist 'this'
+            auto& thisArg = *methodFunc->arg_begin();
+            thisArg.setName("this");
+
+            AllocaInst* thisAlloca = builder->CreateAlloca(
+                thisArg.getType(),
+                nullptr,
+                "this"
+            );
+            builder->CreateStore(&thisArg, thisAlloca);
+            namedValues["this"] = thisAlloca;
+            argIndex = 1;
+        }
+
+        // Rest der Parameter
+        auto argIt = methodFunc->arg_begin();
+        if (!method->isStatic) {
+            ++argIt;  // Skip 'this'
+        }
+
+        for (size_t i = 0; i < method->parameters.size(); i++, ++argIt) {
+            argIt->setName(method->parameters[i].name);
+
+            AllocaInst* alloca = builder->CreateAlloca(
+                argIt->getType(),
+                nullptr,
+                argIt->getName()
+            );
+            builder->CreateStore(&*argIt, alloca);
+            namedValues[std::string(argIt->getName())] = alloca;
+        }
+
+        // Generate Method Body
+        for (const auto& stmt : method->body) {
+            generateStatement(stmt.get());
+        }
+
+        // Auto-return für void methods
+        BasicBlock* currentBlock = builder->GetInsertBlock();
+        if (currentBlock && !currentBlock->getTerminator()) {
+            if (methodFunc->getReturnType()->isVoidTy()) {
+                builder->CreateRetVoid();
+            } else {
+                builder->CreateUnreachable();
+            }
+        }
+
+        verifyFunction(*methodFunc, &errs());
+        namedValues.clear();
+    }
+
+    void generateConstructor(ClassDeclaration *classDecl, ConstructorDeclaration *ctor) {
+        string ctorName = classDecl->name + "_init";
+        Function *ctorFunc = functions[ctorName];
+
+        BasicBlock *entryBlock = BasicBlock::Create(*context, "entry", ctorFunc);
+        builder->SetInsertPoint(entryBlock);
+
+        // Allocate memory für die Instanz
+        Function *mallocFunc = module->getFunction("malloc");
+        StructType *classStruct = classTypes[classDecl->name];
+        Value *size = ConstantExpr::getSizeOf(classStruct);
+        Value *instancePtr = builder->CreateCall(mallocFunc, {size}, "instance");
+        Value *typedPtr = builder->CreateBitCast(
+            instancePtr,
+            PointerType::get(classStruct, 0)
+        );
+
+        // Parameter in namedValues speichern
+        int argIndex = 0;
+        for (auto &arg: ctorFunc->args()) {
+            arg.setName(ctor->parameters[argIndex].name);
+
+            AllocaInst *alloca = builder->CreateAlloca(
+                arg.getType(),
+                nullptr,
+                arg.getName()
+            );
+            builder->CreateStore(&arg, alloca);
+            namedValues[std::string(arg.getName())] = alloca;
+            argIndex++;
+        }
+
+        // Generate Constructor Body
+        for (const auto &stmt: ctor->body) {
+            generateStatement(stmt.get());
+        }
+
+        // Return instance
+        builder->CreateRet(typedPtr);
+
+        verifyFunction(*ctorFunc, &errs());
+        namedValues.clear();
     }
 
     void printIR() {
@@ -198,6 +393,10 @@ private:
     unordered_map<string, Function *> functions;
     Function *currentFunction = nullptr;
 
+    unordered_map<string, StructType*> classTypes;
+    unordered_map<string, ClassDeclaration*> classDecls;
+    ClassDeclaration* currentClass = nullptr;
+
     string mangleFunctionName(const string& name, const vector<Parameter>& parameters) {
         if (name == "main") {
             return "main";
@@ -253,6 +452,11 @@ private:
     void generateStatement(Statement *stmt) {
         if (auto *funcDecl = dynamic_cast<FunctionDeclaration *>(stmt)) {
             generateFunction(funcDecl);
+            return;
+        }
+
+        if (auto* classDecl = dynamic_cast<ClassDeclaration*>(stmt)) {
+            generateClass(classDecl);
             return;
         }
 
@@ -471,7 +675,6 @@ private:
         builder->SetInsertPoint(afterBB);
     }
 
-    // VEREINFACHT: Nutzt exprType direkt!
     Value* generateExpression(Expression* expr) {
         if (!expr->exprType) {
             errs() << "Expression has no type!\n";
@@ -489,6 +692,9 @@ private:
         }
         else if (dynamic_cast<NullLiteral*>(expr)) {
             return ConstantPointerNull::get(PointerType::getUnqual(*context));
+        }
+        else if (auto* newExpr = dynamic_cast<NewExpression*>(expr)) {
+            return generateNewExpression(newExpr);
         }
         else if (auto* interpStr = dynamic_cast<InterpolatedString*>(expr)) {
             return generateInterpolatedString(interpStr);
@@ -532,8 +738,91 @@ private:
             builder->CreateStore(val, varPtr);
             return val;
         }
+        else if (auto* superCall = dynamic_cast<SuperCall*>(expr)) {
+            return generateSuperCall(superCall);
+        }
+        else if (auto* methodCall = dynamic_cast<MethodCall*>(expr)) {
+            return generateMethodCall(methodCall);
+        }
 
         return nullptr;
+    }
+
+    Value *generateMethodCall(MethodCall *methodCall) {
+        // Get object
+        Value *object = generateExpression(methodCall->object.get());
+        if (!object) return nullptr;
+
+        // Hole den Klassenname aus dem Type der Expression
+        string className;
+
+        if (methodCall->object->exprType) {
+            className = methodCall->object->exprType->toString();
+        }
+
+        if (className.empty()) {
+            errs() << "Could not determine class name for method call\n";
+            return nullptr;
+        }
+
+        string methodName = className + "_" + methodCall->methodName;
+
+        Function *methodFunc = functions[methodName];
+        if (!methodFunc) {
+            errs() << "Unknown method: " << methodName << "\n";
+            return nullptr;
+        }
+
+        // Build arguments (first arg is 'this')
+        vector<Value *> args;
+        args.push_back(object); // 'this' pointer
+
+        for (const auto &arg: methodCall->arguments) {
+            args.push_back(generateExpression(arg.get()));
+            if (!args.back()) return nullptr;
+        }
+
+        // Call method
+        if (methodFunc->getReturnType()->isVoidTy()) {
+            builder->CreateCall(methodFunc, args);
+            return nullptr;
+        }
+
+        return builder->CreateCall(methodFunc, args, "method_result");
+    }
+
+    Value* generateSuperCall(SuperCall* superCall) {
+        if (!currentClass) {
+            errs() << "super() called outside of class context\n";
+            return nullptr;
+        }
+
+        // Get parent class name
+        string parentClassName = currentClass->baseClass;
+        if (parentClassName.empty()) {
+            errs() << "super() called but no parent class\n";
+            return nullptr;
+        }
+
+        // Get parent constructor
+        string parentCtorName = parentClassName + "_init";
+        Function* parentCtor = functions[parentCtorName];
+
+        if (!parentCtor) {
+            errs() << "Parent constructor not found: " << parentCtorName << "\n";
+            return nullptr;
+        }
+
+        // Generate arguments
+        vector<Value*> args;
+        for (const auto& arg : superCall->arguments) {
+            args.push_back(generateExpression(arg.get()));
+            if (!args.back()) return nullptr;
+        }
+
+        Value* parentInstance = builder->CreateCall(parentCtor, args, "parent_instance");
+
+        return parentInstance;
     }
 
     Value* generateStringConcatenation(BinaryOperation *binOp) {
@@ -620,6 +909,26 @@ private:
                 errs() << "Unknown binary operator\n";
                 return nullptr;
         }
+    }
+
+    Value* generateNewExpression(NewExpression* newExpr) {
+        string ctorName = newExpr->className + "_init";
+        Function* ctorFunc = functions[ctorName];
+
+        if (!ctorFunc) {
+            errs() << "Unknown class: " << newExpr->className << "\n";
+            return nullptr;
+        }
+
+        // Generate arguments
+        vector<Value*> args;
+        for (const auto& arg : newExpr->arguments) {
+            args.push_back(generateExpression(arg.get()));
+            if (!args.back()) return nullptr;
+        }
+
+        // Call constructor
+        return builder->CreateCall(ctorFunc, args, "new_instance");
     }
 
     Value* generateInterpolatedString(InterpolatedString* interpStr) {

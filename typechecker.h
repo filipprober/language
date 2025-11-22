@@ -65,9 +65,33 @@ public:
             }
         }
 
+        for (const auto& stmt : program->statements) {
+            if (auto* classDecl = dynamic_cast<ClassDeclaration*>(stmt.get())) {
+                collectClass(classDecl);
+            }
+        }
+
         // Pass 2: Type-check alle Statements
         for (const auto& stmt : program->statements) {
             checkStatement(stmt.get());
+        }
+    }
+
+    void collectClass(ClassDeclaration* classDecl) {
+        // Constructors haben keinen Eintrag in functionTable,
+        // weil sie speziell behandelt werden
+
+        // Aber wir müssen die Methoden sammeln
+        for (const auto& method : classDecl->methods) {
+            FunctionSignature sig;
+            for (const auto& param : method->parameters) {
+                sig.paramTypes.push_back(param.resolvedType);
+            }
+            sig.returnType = method->resolvedReturnType;
+
+            // Method name ist ClassName_methodName
+            string fullName = classDecl->name + "_" + method->name;
+            functionTable[fullName] = sig;
         }
     }
 
@@ -95,9 +119,50 @@ private:
         functionTable[funcDecl->name] = sig;
     }
 
+    void checkClass(ClassDeclaration* classDecl) {
+        // Check Constructors
+        for (const auto& ctor : classDecl->constructors) {
+            // Parameters in symbol table
+            for (const auto& param : ctor->parameters) {
+                symbolTable[param.name] = param.resolvedType;
+            }
+
+            // Check body
+            for (const auto& stmt : ctor->body) {
+                checkStatement(stmt.get());
+            }
+
+            // Clear parameters
+            for (const auto& param : ctor->parameters) {
+                symbolTable.erase(param.name);
+            }
+        }
+
+        // Check Methods
+        for (const auto& method : classDecl->methods) {
+            // Parameters in symbol table
+            for (const auto& param : method->parameters) {
+                symbolTable[param.name] = param.resolvedType;
+            }
+
+            // Check body
+            for (const auto& stmt : method->body) {
+                checkStatement(stmt.get());
+            }
+
+            // Clear parameters
+            for (const auto& param : method->parameters) {
+                symbolTable.erase(param.name);
+            }
+        }
+    }
+
     void checkStatement(Statement* stmt) {
         if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt)) {
             checkFunction(funcDecl);
+        }
+        else if (auto* classDecl = dynamic_cast<ClassDeclaration*>(stmt)) {
+            checkClass(classDecl);
         }
         else if (auto* varDecl = dynamic_cast<VariableDeclaration*>(stmt)) {
             checkVarDeclaration(varDecl);
@@ -225,6 +290,45 @@ private:
         else if (auto* assign = dynamic_cast<Assignment*>(expr)) {
             inferType(assign->value.get());
             expr->exprType = assign->value->exprType;
+        }
+        else if (auto* superCall = dynamic_cast<SuperCall*>(expr)) {
+            expr->exprType = MyType::Void();
+
+            // Infer argument types
+            for (const auto& arg : superCall->arguments) {
+                inferType(arg.get());
+            }
+        } else if (auto* methodCall = dynamic_cast<MethodCall*>(expr)) {
+            // Infer type of object first
+            auto objectType = inferType(methodCall->object.get());
+
+            // Infer argument types
+            for (const auto& arg : methodCall->arguments) {
+                inferType(arg.get());
+            }
+
+            // Get class name from object type
+            string className = objectType->toString();
+
+            // Look up method in function table
+            string methodName = className + "_" + methodCall->methodName;
+            auto it = functionTable.find(methodName);
+            if (it != functionTable.end()) {
+                expr->exprType = it->second.returnType;
+            } else {
+                // Fallback
+                expr->exprType = MyType::Void();
+            }
+        }
+        else if (auto* newExpr = dynamic_cast<NewExpression*>(expr)) {
+            // Infer argument types
+            for (const auto& arg : newExpr->arguments) {
+                inferType(arg.get());
+            }
+
+            // Type of new expression is the class type (as a pointer)
+            // For now, we just use the class name as the type
+            expr->exprType = MyType::Class(newExpr->className);
         }
 
         if (!expr->exprType) {

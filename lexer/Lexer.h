@@ -48,6 +48,7 @@ private:
 unordered_map<string, TokenType> Lexer::keywords = {
     {"namespace", TokenType::NAMESPACE},
     {"use", TokenType::USE},
+    {"new", TokenType::NEW},
     {"class", TokenType::CLASS},
     {"abstract", TokenType::ABSTRACT},
     {"interface", TokenType::INTERFACE},
@@ -524,7 +525,7 @@ bool Lexer::isDigit(char c) const {
 }
 
 bool Lexer::isAlpha(char c) const {
-    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
 bool Lexer::isAlphaNumeric(char c) const {

@@ -203,11 +203,179 @@ private:
             return parseReturnStatement();
         }
 
-        if (match(TokenType::TRY)) {
-            cout << "using try" << endl;
+        if (match(TokenType::CLASS)) {
+            return parseClassDeclaration();
+        }
+
+        if (match(TokenType::INTERFACE)) {
+            return parseInterfaceDeclaration();
+        }
+
+        if (match(TokenType::TRAIT)) {
+            return parseTraitDeclaration();
+        }
+
+        if (match(TokenType::ABSTRACT)) {
+            if (match(TokenType::CLASS)) {
+                return parseClassDeclaration(true); // <- isAbstract = true
+            }
         }
 
         return parseExpressionStatement();
+    }
+
+    unique_ptr<Statement> parseClassDeclaration(bool isAbstract = false) {
+        Token className = consume(TokenType::IDENTIFIER, "Expected class naem");
+
+        // extends
+        string baseClass;
+        if (match(TokenType::EXTENDS)) {
+            Token base = consume(TokenType::IDENTIFIER, "Expected base class name");
+            baseClass = base.lexeme;
+        }
+
+        auto classDecl = make_unique<ClassDeclaration>(className.lexeme, baseClass, isAbstract);
+
+        // implements
+        if (match(TokenType::IMPLEMENTS)) {
+            do {
+                Token iface = consume(TokenType::IDENTIFIER, "Expected interface name");
+                classDecl->interfaces.push_back(iface.lexeme);
+            } while (match(TokenType::COMMA));
+        }
+
+        consume(TokenType::COLON, "Expected ':' after class signature");
+        while (match(TokenType::NEWLINE)) {}
+        consume(TokenType::INDENT, "Expected indentation");
+
+        // Parse class body
+        while (!check(TokenType::DEDENT) && !isAtEnd()) {
+            while (match(TokenType::NEWLINE)) {}
+
+            if (check(TokenType::DEDENT)) break;
+
+            // Visibility
+            Visibility vis = Visibility::Private;
+            if (match(TokenType::PUBLIC)) {
+                vis = Visibility::Public;
+            } else if (match(TokenType::PROTECTED)) {
+                vis = Visibility::Protected;
+            } else if (match(TokenType::PRIVATE)) {
+                vis = Visibility::Private;
+            }
+
+            // Property oder Method?
+            if (match(TokenType::VAR)) {
+                // Property
+                Token propName = consume(TokenType::IDENTIFIER, "Expected property name");
+                consume(TokenType::COLON, "Expected ':' after property name");
+                string propType = parseType();
+
+                unique_ptr<Expression> initializer = nullptr;
+                if (match(TokenType::EQUAL)) {
+                    initializer = parseExpression();
+                }
+
+                classDecl->properties.emplace_back(propName.lexeme, propType,
+                                                   std::move(initializer), vis);
+                match(TokenType::NEWLINE);
+            } else if (match(TokenType::INIT)) {
+                // Constructor
+                auto ctor = parseConstructor(vis);
+                classDecl->constructors.push_back(std::move(ctor));
+            } else if (match(TokenType::CONST)) {
+                // Static method
+                if (!match(TokenType::FN)) {
+                    reportError("Expected 'fn' after 'const'");
+                }
+                auto method = parseMethod(vis, true);
+                classDecl->methods.push_back(std::move(method));
+            } else if (match(TokenType::ABSTRACT)) {
+                // Abstract method
+                if (!match(TokenType::FN)) {
+                    reportError("Expected 'fn' after 'abstract'");
+                }
+                auto method = parseMethod(vis, false, true);
+                classDecl->methods.push_back(std::move(method));
+            } else if (match(TokenType::FN)) {
+                // Regular method
+                auto method = parseMethod(vis);
+                classDecl->methods.push_back(std::move(method));
+            } else {
+                reportError("Unexpected token in class body");
+            }
+        }
+
+        consume(TokenType::DEDENT, "Expected dedent after class body");
+
+        return classDecl;
+    }
+
+    unique_ptr<ConstructorDeclaration> parseConstructor(Visibility vis) {
+        consume(TokenType::LEFT_PAREN, "Expected '(' after init");
+
+        vector<Parameter> parameters;
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do {
+                Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+                consume(TokenType::COLON, "Expected ':' after parameter name");
+                string paramType = parseType();
+                parameters.emplace_back(paramName.lexeme, paramType);
+            } while (match(TokenType::COMMA));
+        }
+
+        consume(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
+        consume(TokenType::COLON, "Expected ':' after constructor signature");
+
+        while (match(TokenType::NEWLINE)) {
+        }
+        vector<unique_ptr<Statement>> body = parseBlock();
+
+        auto ctor = make_unique<ConstructorDeclaration>(std::move(parameters),
+                                                        std::move(body), vis);
+
+        // Check für super() call im body
+        // TODO: Parse super() als erstes Statement
+
+        return ctor;
+    }
+
+    unique_ptr<MethodDeclaration> parseMethod(Visibility vis, bool isStatic = false,
+                                              bool isAbstract = false) {
+        Token methodName = consume(TokenType::IDENTIFIER, "Expected method name");
+        consume(TokenType::LEFT_PAREN, "Expected '(' after method name");
+
+        vector<Parameter> parameters;
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do {
+                Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
+                consume(TokenType::COLON, "Expected ':' after parameter name");
+                string paramType = parseType();
+                parameters.emplace_back(paramName.lexeme, paramType);
+            } while (match(TokenType::COMMA));
+        }
+
+        consume(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
+
+        string returnType = "void";
+        if (match(TokenType::ARROW)) {
+            returnType = parseType();
+        }
+
+        consume(TokenType::COLON, "Expected ':' after method signature");
+
+        vector<unique_ptr<Statement> > body;
+        if (!isAbstract) {
+            while (match(TokenType::NEWLINE)) {
+            }
+            body = parseBlock();
+        } else {
+            match(TokenType::NEWLINE);
+        }
+
+        return make_unique<MethodDeclaration>(methodName.lexeme, std::move(parameters),
+                                              returnType, std::move(body), vis,
+                                              isStatic, isAbstract);
     }
 
     unique_ptr<Statement> parseFunctionDeclaration() {
@@ -461,7 +629,116 @@ private:
             return make_unique<UnaryOperation>(op, std::move(operand));
         }
 
-        return parsePrimary();
+        return parsePostfix();
+    }
+
+    unique_ptr<Expression> parsePostfix() {
+        auto expr = parsePrimary();
+
+        while (true) {
+            if (check(TokenType::DOT)) {
+                // Schaue voraus: ist das nächste Token ein Identifier?
+                // Wenn ja -> Member Access, wenn nein -> kein DOT konsumieren
+                if (current + 1 < tokens.size() &&
+                    tokens[current + 1].type == TokenType::IDENTIFIER) {
+
+                    match(TokenType::DOT);  // Jetzt konsumieren
+                    Token memberName = consume(TokenType::IDENTIFIER, "Expected member name after '.'");
+
+                    if (match(TokenType::LEFT_PAREN)) {
+                        // Method call
+                        vector<unique_ptr<Expression>> arguments;
+                        if (!check(TokenType::RIGHT_PAREN)) {
+                            do {
+                                arguments.push_back(parseExpression());
+                            } while (match(TokenType::COMMA));
+                        }
+                        consume(TokenType::RIGHT_PAREN, "Expected ')' after arguments");
+
+                        expr = make_unique<MethodCall>(std::move(expr), memberName.lexeme,
+                                                      std::move(arguments));
+                    } else {
+                        // Member access
+                        expr = make_unique<MemberAccess>(std::move(expr), memberName.lexeme);
+                    }
+                    } else {
+                        // Kein Identifier nach DOT -> kein Member Access
+                        // Lasse DOT für String-Concatenation
+                        break;
+                    }
+            } else {
+                break;
+            }
+        }
+
+        return expr;
+    }
+
+    unique_ptr<Statement> parseInterfaceDeclaration() {
+        Token interfaceName = consume(TokenType::IDENTIFIER, "Expected interface name");
+        auto interfaceDecl = make_unique<InterfaceDeclaration>(interfaceName.lexeme);
+
+        consume(TokenType::COLON, "Expected ':' after interface name");
+        while (match(TokenType::NEWLINE)) {
+        }
+        consume(TokenType::INDENT, "Expected indentation");
+
+        while (!check(TokenType::DEDENT) && !isAtEnd()) {
+            while (match(TokenType::NEWLINE)) {
+            }
+            if (check(TokenType::DEDENT)) break;
+
+            // Interface methods sind immer public und abstract
+            if (!match(TokenType::FN)) {
+                reportError("Expected 'fn' in interface");
+            }
+
+            auto method = parseMethod(Visibility::Public, false, true);
+            interfaceDecl->methods.push_back(std::move(method));
+        }
+
+        consume(TokenType::DEDENT, "Expected dedent after interface body");
+        return interfaceDecl;
+    }
+
+    unique_ptr<Statement> parseTraitDeclaration() {
+        Token traitName = consume(TokenType::IDENTIFIER, "Expected trait name");
+        auto traitDecl = make_unique<TraitDeclaration>(traitName.lexeme);
+
+        consume(TokenType::COLON, "Expected ':' after trait name");
+        while (match(TokenType::NEWLINE)) {
+        }
+        consume(TokenType::INDENT, "Expected indentation");
+
+        while (!check(TokenType::DEDENT) && !isAtEnd()) {
+            while (match(TokenType::NEWLINE)) {
+            }
+            if (check(TokenType::DEDENT)) break;
+
+            if (match(TokenType::VAR)) {
+                // Trait property
+                Token propName = consume(TokenType::IDENTIFIER, "Expected property name");
+                consume(TokenType::COLON, "Expected ':' after property name");
+                string propType = parseType();
+
+                unique_ptr<Expression> initializer = nullptr;
+                if (match(TokenType::EQUAL)) {
+                    initializer = parseExpression();
+                }
+
+                traitDecl->properties.emplace_back(propName.lexeme, propType,
+                                                   std::move(initializer), Visibility::Public);
+                match(TokenType::NEWLINE);
+            } else if (match(TokenType::FN)) {
+                auto method = parseMethod(Visibility::Public, false, false);
+                traitDecl->methods.push_back(std::move(method));
+            } else {
+                reportError("Unexpected token in trait body");
+            }
+        }
+
+        consume(TokenType::DEDENT, "Expected dedent after trait body");
+        return traitDecl;
     }
 
     unique_ptr<Expression> parsePrimary() {
@@ -501,6 +778,41 @@ private:
             }
 
             return make_unique<InterpolatedString>(template_str, std::move(variables));
+        }
+
+        if (match(TokenType::NEW)) {
+            Token className = consume(TokenType::IDENTIFIER, "Expected class name after 'new'");
+            consume(TokenType::LEFT_PAREN, "Expected '(' after class name");
+
+            vector<unique_ptr<Expression>> arguments;
+            if (!check(TokenType::RIGHT_PAREN)) {
+                do {
+                    arguments.push_back(parseExpression());
+                } while (match(TokenType::COMMA));
+            }
+
+            consume(TokenType::RIGHT_PAREN, "Expected ')' after arguments");
+            return make_unique<NewExpression>(className.lexeme, std::move(arguments));
+        }
+
+        if (match(TokenType::THIS)) {
+            return make_unique<ThisExpression>();
+        }
+
+        if (match(TokenType::SUPER)) {
+            if (match(TokenType::LEFT_PAREN)) {
+                // super(...) call
+                vector<unique_ptr<Expression>> arguments;
+                if (!check(TokenType::RIGHT_PAREN)) {
+                    do {
+                        arguments.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RIGHT_PAREN, "Expected ')' after super arguments");
+                return make_unique<SuperCall>(std::move(arguments));
+            } else {
+                return make_unique<SuperExpression>();
+            }
         }
 
         if (match(TokenType::LEFT_BRACKET)) {
