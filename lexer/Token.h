@@ -1,5 +1,7 @@
 #pragma once
 
+using namespace std;
+
 enum class TokenType
 {
     NAMESPACE, USE,
@@ -36,4 +38,25 @@ enum class TokenType
 
     NEWLINE, INDENT, DEDENT,
     EOF_TOKEN, UNKNOWN,
+};
+
+struct Token
+{
+    TokenType type;
+    string lexeme;
+    SourceLocation location;
+
+    Token(TokenType type, const string& lexeme, int line, int column) :
+        type(type),
+        lexeme(lexeme),
+        location(line, column, lexeme.length())
+    {
+    }
+
+    Token(TokenType type, const string& lexeme, SourceLocation location) :
+        type(type),
+        lexeme(lexeme),
+        location(location)
+    {
+    }
 };
