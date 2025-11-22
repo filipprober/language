@@ -50,7 +50,7 @@ public:
 };
 
 // ======================
-// Type Checker (NEU)
+// Type Checker
 // ======================
 
 class TypeChecker {

@@ -1,4 +1,6 @@
 fn main():
-    var numbers: int[] = [1, 2, 3, 4, 5]
-    var cities: string[] = ["Vienna", "Berlin"]
+    var numbers = [1, 2, 3, 4, 5]
+    print(numbers)
+
+    var cities = ["Vienna", "Berlin"]
     print(cities)
