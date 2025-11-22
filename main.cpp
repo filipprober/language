@@ -27,6 +27,9 @@
 using namespace std;
 using namespace llvm;
 
+// ======================
+// Type System (NEU - ZENTRAL)
+// ======================
 struct SourceLocation
 {
     int line;
@@ -37,9 +40,177 @@ struct SourceLocation
         line(line),
         column(column),
         length(length) {
-        //
     }
 };
+
+enum class TypeKind {
+    Int,
+    Bool,
+    Float,
+    String,
+    Void,
+    Null,
+    Array,
+    Optional,
+    Unknown
+};
+
+class MyType {
+public:
+    TypeKind kind;
+    shared_ptr<MyType> elementType;  // Für Arrays und Optional
+
+    // Public constructor für make_shared
+    explicit MyType(TypeKind k) : kind(k), elementType(nullptr) {}
+
+    static shared_ptr<MyType> Int() {
+        static auto t = make_shared<MyType>(TypeKind::Int);
+        return t;
+    }
+
+    static shared_ptr<MyType> Bool() {
+        static auto t = make_shared<MyType>(TypeKind::Bool);
+        return t;
+    }
+
+    static shared_ptr<MyType> Float() {
+        static auto t = make_shared<MyType>(TypeKind::Float);
+        return t;
+    }
+
+    static shared_ptr<MyType> String() {
+        static auto t = make_shared<MyType>(TypeKind::String);
+        return t;
+    }
+
+    static shared_ptr<MyType> Void() {
+        static auto t = make_shared<MyType>(TypeKind::Void);
+        return t;
+    }
+
+    static shared_ptr<MyType> Null() {
+        static auto t = make_shared<MyType>(TypeKind::Null);
+        return t;
+    }
+
+    static shared_ptr<MyType> Array(shared_ptr<MyType> elem) {
+        auto t = make_shared<MyType>(TypeKind::Array);
+        t->elementType = elem;
+        return t;
+    }
+
+    static shared_ptr<MyType> Optional(shared_ptr<MyType> elem) {
+        auto t = make_shared<MyType>(TypeKind::Optional);
+        t->elementType = elem;
+        return t;
+    }
+
+    static shared_ptr<MyType> parse(const string& typeStr) {
+        if (typeStr.empty() || typeStr == "void") {
+            return Void();
+        }
+
+        // Optional: int?
+        if (typeStr.back() == '?') {
+            string base = typeStr.substr(0, typeStr.length() - 1);
+            return Optional(parse(base));
+        }
+
+        // Array: int[]
+        if (typeStr.length() > 2 && typeStr.substr(typeStr.length() - 2) == "[]") {
+            string base = typeStr.substr(0, typeStr.length() - 2);
+            return Array(parse(base));
+        }
+
+        if (typeStr == "int") return Int();
+        if (typeStr == "bool") return Bool();
+        if (typeStr == "float") return Float();
+        if (typeStr == "string") return String();
+
+        return make_shared<MyType>(TypeKind::Unknown);
+    }
+
+    string toString() const {
+        switch (kind) {
+            case TypeKind::Int: return "int";
+            case TypeKind::Bool: return "bool";
+            case TypeKind::Float: return "float";
+            case TypeKind::String: return "string";
+            case TypeKind::Void: return "void";
+            case TypeKind::Null: return "null";
+            case TypeKind::Array:
+                return elementType->toString() + "[]";
+            case TypeKind::Optional:
+                return elementType->toString() + "?";
+            default: return "unknown";
+        }
+    }
+
+    bool equals(const shared_ptr<MyType>& other) const {
+        if (!other) return false;
+        if (kind != other->kind) return false;
+
+        if (kind == TypeKind::Array || kind == TypeKind::Optional) {
+            return elementType && other->elementType &&
+                   elementType->equals(other->elementType);
+        }
+        return true;
+    }
+
+    bool isNumeric() const {
+        return kind == TypeKind::Int || kind == TypeKind::Float;
+    }
+
+    bool canAssignFrom(const shared_ptr<MyType>& other) const {
+        if (equals(other)) return true;
+
+        if (kind == TypeKind::Optional && other->kind == TypeKind::Null) {
+            return true;
+        }
+
+        if (kind == TypeKind::Optional && elementType) {
+            return elementType->equals(other);
+        }
+
+        return false;
+    }
+
+    llvm::Type* toLLVMType(LLVMContext& context) const {
+        switch (kind) {
+            case TypeKind::Int:
+                return llvm::Type::getInt32Ty(context);
+            case TypeKind::Bool:
+                return llvm::Type::getInt1Ty(context);
+            case TypeKind::Float:
+                return llvm::Type::getDoubleTy(context);
+            case TypeKind::String:
+                return PointerType::get(llvm::Type::getInt8Ty(context), 0);
+            case TypeKind::Void:
+                return llvm::Type::getVoidTy(context);
+            case TypeKind::Optional:
+                if (elementType) {
+                    return PointerType::get(elementType->toLLVMType(context), 0);
+                }
+                return PointerType::getUnqual(context);
+            case TypeKind::Array: {
+                if (elementType) {
+                    vector<llvm::Type*> fields = {
+                        llvm::Type::getInt32Ty(context),
+                        PointerType::get(elementType->toLLVMType(context), 0)
+                    };
+                    return StructType::create(context, fields, "array_" + elementType->toString());
+                }
+                return llvm::Type::getInt32Ty(context);
+            }
+            default:
+                return llvm::Type::getInt32Ty(context);
+        }
+    }
+};
+
+// Forward declarations
+struct SourceLocation;
+class ExceptionReporter;
 
 class ExceptionReporter
 {
@@ -48,7 +219,6 @@ public:
         source(source),
         filename(filename),
         hasErrors(false) {
-        //
     }
 
     void error(const SourceLocation& location, const string& message) {
@@ -77,7 +247,6 @@ private:
     bool hasErrors;
 
     void printSourceLine(const SourceLocation& location) {
-        // Split source into lines
         vector<string> lines;
         stringstream ss(source);
         string line;
@@ -91,7 +260,6 @@ private:
 
         string sourceLine = lines[location.line - 1];
 
-        // Line number padding
         int lineNumWidth = to_string(location.line).length();
         string padding(lineNumWidth, ' ');
 
@@ -99,12 +267,10 @@ private:
         cerr << location.line << " | " << sourceLine << endl;
         cerr << padding << " | ";
 
-        // Print spaces until error position
         for (int i = 0; i < location.column - 1; i++) {
             cerr << " ";
         }
 
-        // Print error indicator (^^^)
         cerr << "\033[1;31m";
         for (int i = 0; i < location.length; i++) {
             cerr << "^";
@@ -116,10 +282,6 @@ private:
 
 enum class TokenType
 {
-    // ======================
-    // Keywords
-    // ======================
-
     NAMESPACE, USE,
     CLASS, ABSTRACT, INTERFACE, TRAIT, ENUM,
     EXTENDS, IMPLEMENTS,
@@ -130,15 +292,7 @@ enum class TokenType
     ASYNC, AWAIT,
     TRY, CATCH, FINALLY, THROW,
 
-    // ======================
-    // Types
-    // ======================
-
-    INT, FLOAT, STRING, BOOL, VOID, ANY,
-
-    // ======================
-    // Literals
-    // ======================
+    INT, FLOAT, STRING, BOOL, VOID, ANY, QUESTION,
 
     TRUE, FALSE, NONE,
     IDENTIFIER,
@@ -147,34 +301,18 @@ enum class TokenType
     STRING_LITERAL,
     INTERPOLATED_STRING,
 
-    // ======================
-    // Operators
-    // ======================
-
     PLUS, MINUS, STAR, SLASH, PERCENT,
     EQUAL, EQUAL_EQUAL, BANG_EQUAL,
     LESS, LESS_EQUAL, GREATER, GREATER_EQUAL,
     PLUS_EQUAL, MINUS_EQUAL, STAR_EQUAL, SLASH_EQUAL,
 
-    // ======================
-    // Logical
-    // ======================
-
     AND, OR, NOT, IS, AS, IN,
-
-    // ======================
-    // Delimeters
-    // ======================
 
     LEFT_PAREN, RIGHT_PAREN,
     LEFT_BRACE, RIGHT_BRACE,
     LEFT_BRACKET, RIGHT_BRACKET,
     COMMA, DOT, COLON, SEMICOLON,
     ARROW, FAT_ARROW, DOUBLE_COLON,
-
-    // ======================
-    // Special
-    // ======================
 
     NEWLINE, INDENT, DEDENT,
     EOF_TOKEN, UNKNOWN,
@@ -191,7 +329,6 @@ struct Token
         lexeme(lexeme),
         location(line, column, lexeme.length())
     {
-        //
     }
 
     Token(TokenType type, const string& lexeme, SourceLocation location) :
@@ -199,7 +336,6 @@ struct Token
         lexeme(lexeme),
         location(location)
     {
-
     }
 };
 
@@ -210,9 +346,6 @@ class ASTNode;
 class Expression;
 class Statement;
 
-// ======================
-// AST BASE CLASSES
-// ======================
 class ASTNode
 {
 public:
@@ -220,8 +353,10 @@ public:
     virtual void print(int indent = 0) const = 0;
 };
 
+// UPDATED: Expression jetzt mit Type
 class Expression : public ASTNode {
 public:
+    shared_ptr<MyType> exprType;  // Der Typ dieser Expression
     virtual ~Expression() override = default;
 };
 
@@ -239,7 +374,7 @@ public:
     int value;
 
     explicit IntLiteral(int value) : value(value) {
-        //
+        exprType = MyType::Int();
     }
 
     void print(int indent = 0) const override {
@@ -247,12 +382,12 @@ public:
     }
 };
 
-class StringLiteral : public Expression {
+class MyStringLiteral : public Expression {
 public:
     string value;
 
-    explicit StringLiteral(string value) : value(value) {
-        //
+    explicit MyStringLiteral(string value) : value(value) {
+        exprType = MyType::String();
     }
 
     void print(int indent = 0) const override {
@@ -268,7 +403,7 @@ public:
     InterpolatedString(const string& template_str, vector<string> variables) :
         template_str(template_str),
         variables(std::move(variables)) {
-        //
+        exprType = MyType::String();
     }
 
     void print(int indent = 0) const override {
@@ -285,11 +420,22 @@ public:
     bool value;
 
     explicit BoolLiteral(bool value) : value(value) {
-        //
+        exprType = MyType::Bool();
     }
 
     void print(int indent = 0) const override {
         cout << string(indent, ' ') << "BoolLiteral(" << (value ? "true" : "false") << ")" << endl;
+    }
+};
+
+class NullLiteral : public Expression {
+public:
+    NullLiteral() {
+        exprType = MyType::Null();
+    }
+
+    void print(int indent = 0) const override {
+        cout << string(indent, ' ') << "NullLiteral(null)" << endl;
     }
 };
 
@@ -298,7 +444,7 @@ public:
     string name;
 
     explicit Variable(const string& name) : name(name) {
-        //
+        // Type wird später vom TypeChecker gesetzt
     }
 
     void print(int indent = 0) const override {
@@ -316,7 +462,7 @@ public:
         left(std::move(left)),
         op(op),
         right(std::move(right)) {
-        //
+        // Type wird später gesetzt
     }
 
     void print(int indent = 0) const override {
@@ -335,7 +481,6 @@ public:
     Assignment(const string& name, unique_ptr<Expression> value) :
         name(name),
         value(std::move(value)) {
-        //
     }
 
     void print(int indent = 0) const override {
@@ -352,7 +497,6 @@ public:
     UnaryOperation(TokenType op, unique_ptr<Expression> operand) :
         op(op),
         operand(std::move(operand)) {
-        //
     }
 
     void print(int indent = 0) const override {
@@ -368,20 +512,20 @@ public:
 class VariableDeclaration : public Statement {
 public:
     string name;
-    string type; // Optional
+    string typeStr;
+    shared_ptr<MyType> resolvedType;  // UPDATED: Resolved type
     unique_ptr<Expression> initializer;
 
     VariableDeclaration(const string& name, const string& type, unique_ptr<Expression> initializer) :
         name(name),
-        type(type),
+        typeStr(type),
         initializer(std::move(initializer)) {
-        //
     }
 
     void print(int indent = 0) const override {
         cout << string(indent, ' ') << "VariableDeclaration(name=" << name;
-        if (!type.empty()) {
-            cout << ", type=" << type;
+        if (!typeStr.empty()) {
+            cout << ", type=" << typeStr;
         }
         cout << ")" << endl;
         if (initializer) {
@@ -418,20 +562,16 @@ public:
     }
 };
 
-// ======================
-// Function Related Nodes
-// ======================
-
-// Function Parameter: (name: type)
 class Parameter {
 public:
     string name;
-    string type;
+    string typeStr;
+    shared_ptr<MyType> resolvedType;  // UPDATED
 
     Parameter(const string& name, const string& type) :
         name(name),
-        type(type) {
-        //
+        typeStr(type),
+        resolvedType(MyType::parse(type)) {
     }
 };
 
@@ -439,15 +579,16 @@ class FunctionDeclaration : public Statement {
 public:
     string name;
     vector<Parameter> parameters;
-    string returnType;
+    string returnTypeStr;
+    shared_ptr<MyType> resolvedReturnType;  // UPDATED
     vector<unique_ptr<Statement>> body;
 
     FunctionDeclaration(const string& name, vector<Parameter> parameters, const string& returnType, vector<unique_ptr<Statement>> body) :
         name(name),
         parameters(std::move(parameters)),
-        returnType(returnType),
+        returnTypeStr(returnType),
+        resolvedReturnType(MyType::parse(returnType)),
         body(std::move(body)) {
-        //
     }
 
     void print(int indent = 0) const override {
@@ -456,12 +597,12 @@ public:
         cout << ", params=[";
         for (size_t i = 0; i < parameters.size(); i++) {
             if (i > 0) cout << ", ";
-            cout << parameters[i].name << ": " << parameters[i].type;
+            cout << parameters[i].name << ": " << parameters[i].typeStr;
         }
         cout << "]";
 
-        if (!returnType.empty()) {
-            cout << ", returns=" << returnType;
+        if (!returnTypeStr.empty()) {
+            cout << ", returns=" << returnTypeStr;
         }
         cout << ")" << endl;
 
@@ -471,7 +612,6 @@ public:
     }
 };
 
-// Function Call: add(5, 3);
 class FunctionCall : public Expression {
 public:
     string name;
@@ -480,7 +620,6 @@ public:
     FunctionCall(const string& name, vector<unique_ptr<Expression>> arguments) :
         name(name),
         arguments(std::move(arguments)) {
-        //
     }
 
     void print(int indent = 0) const override {
@@ -491,12 +630,11 @@ public:
     }
 };
 
-// If Statement: if x > 5:
 class IfStatement : public Statement {
 public:
     unique_ptr<Expression> condition;
     vector<unique_ptr<Statement>> thenBranch;
-    vector<unique_ptr<Statement>> elseBranch; // Optional
+    vector<unique_ptr<Statement>> elseBranch;
 
     IfStatement(
         unique_ptr<Expression> condition,
@@ -505,7 +643,6 @@ public:
     ) : condition(std::move(condition)),
         thenBranch(std::move(thenBranch)),
         elseBranch(std::move(elseBranch)) {
-        //
     }
 
     void print(int indent = 0) const override {
@@ -527,7 +664,6 @@ public:
     }
 };
 
-// While Statement: while x < 10:
 class WhileStatement : public Statement {
 public:
     unique_ptr<Expression> condition;
@@ -551,14 +687,9 @@ public:
     }
 };
 
-// ======================
-// Return Path Analysis
-// ======================
-
 class ReturnPathAnalyzer
 {
 public:
-    // Prüft, ob alle Code-Pfade einen Return haben
     static bool hasReturnOnAllPaths(const vector<unique_ptr<Statement>>& statements) {
         for (size_t i = 0; i < statements.size(); i++) {
             const auto& stmt = statements[i];
@@ -567,56 +698,40 @@ public:
                 return true;
             }
 
-            // If-Statement mit else
             if (auto* ifStmt = dynamic_cast<IfStatement*>(stmt.get())) {
-                // Nur wenn BEIDE Zweige existieren UND beide returnen
                 if (!ifStmt->elseBranch.empty()) {
                     bool thenReturns = hasReturnOnAllPaths(ifStmt->thenBranch);
                     bool elseReturns = hasReturnOnAllPaths(ifStmt->elseBranch);
 
                     if (thenReturns && elseReturns) {
-                        // Beide Zweige returnen -> diese if-else Statement gilt als "returning"
-                        // Aber wir müssen weitermachen, falls danach noch Code kommt
-                        // (sollte eigentlich "unreachable code" sein, aber egal)
                         return true;
                     }
                 }
-                // Wenn if kein else hat oder nicht beide returnen, weitermachen
             }
-            // While-Schleifen garantieren keinen Return (können 0 mal laufen)
-            // Also ignorieren wir sie hier
         }
 
         return false;
     }
 
-    // Prüft eine Funktion auf korrekte Returns
     static void validateFunction(const FunctionDeclaration* funcDecl) {
         string funcName = funcDecl->name;
-        string returnType = funcDecl->returnType;
 
-        // main() wird speziell behandelt
         if (funcName == "main") {
-            return; // main darf implizit 0 zurückgeben
+            return;
         }
 
-        // void-Funktionen brauchen keinen expliziten Return
-        if (returnType == "void" || returnType.empty()) {
+        if (funcDecl->resolvedReturnType->kind == TypeKind::Void) {
             return;
         }
 
         if (!hasReturnOnAllPaths(funcDecl->body)) {
             throw runtime_error(
-                "Function '" + funcName + "' with return type '" + returnType +
+                "Function '" + funcName + "' with return type '" + funcDecl->returnTypeStr +
                 "' does not return a value on all code paths"
             );
         }
     }
 };
-
-// ======================
-// Program (Root Node)
-// ======================
 
 class Program : public ASTNode {
 public:
@@ -632,8 +747,190 @@ public:
 };
 
 // ======================
-// Parser
+// Type Checker (NEU)
 // ======================
+
+class TypeChecker {
+public:
+    TypeChecker(ExceptionReporter& reporter) : reporter(reporter) {}
+
+    void check(Program* program) {
+        // Pass 1: Sammle alle Funktionen ZUERST
+        for (const auto& stmt : program->statements) {
+            if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
+                collectFunction(funcDecl);
+            }
+        }
+
+        // Pass 2: Type-check alle Statements
+        for (const auto& stmt : program->statements) {
+            checkStatement(stmt.get());
+        }
+    }
+
+    unordered_map<string, shared_ptr<MyType>>& getSymbolTable() {
+        return symbolTable;
+    }
+
+private:
+    ExceptionReporter& reporter;
+    unordered_map<string, shared_ptr<MyType>> symbolTable;
+
+    struct FunctionSignature {
+        vector<shared_ptr<MyType>> paramTypes;
+        shared_ptr<MyType> returnType;
+    };
+    unordered_map<string, FunctionSignature> functionTable;
+
+    void collectFunction(FunctionDeclaration* funcDecl) {
+        FunctionSignature sig;
+        for (const auto& param : funcDecl->parameters) {
+            sig.paramTypes.push_back(param.resolvedType);
+        }
+        sig.returnType = funcDecl->resolvedReturnType;
+
+        functionTable[funcDecl->name] = sig;
+    }
+
+    void checkStatement(Statement* stmt) {
+        if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt)) {
+            checkFunction(funcDecl);
+        }
+        else if (auto* varDecl = dynamic_cast<VariableDeclaration*>(stmt)) {
+            checkVarDeclaration(varDecl);
+        }
+        else if (auto* ret = dynamic_cast<ReturnStatement*>(stmt)) {
+            if (ret->value) {
+                inferType(ret->value.get());
+            }
+        }
+        else if (auto* ifStmt = dynamic_cast<IfStatement*>(stmt)) {
+            inferType(ifStmt->condition.get());
+            for (const auto& s : ifStmt->thenBranch) checkStatement(s.get());
+            for (const auto& s : ifStmt->elseBranch) checkStatement(s.get());
+        }
+        else if (auto* whileStmt = dynamic_cast<WhileStatement*>(stmt)) {
+            inferType(whileStmt->condition.get());
+            for (const auto& s : whileStmt->body) checkStatement(s.get());
+        }
+        else if (auto* exprStmt = dynamic_cast<ExpressionStatement*>(stmt)) {
+            inferType(exprStmt->expression.get());
+        }
+    }
+
+    void checkFunction(FunctionDeclaration* funcDecl) {
+        // Parameters in symbol table
+        for (const auto& param : funcDecl->parameters) {
+            symbolTable[param.name] = param.resolvedType;
+        }
+
+        // Check body
+        for (const auto& stmt : funcDecl->body) {
+            checkStatement(stmt.get());
+        }
+
+        // Clear parameters
+        for (const auto& param : funcDecl->parameters) {
+            symbolTable.erase(param.name);
+        }
+    }
+
+    void checkVarDeclaration(VariableDeclaration* varDecl) {
+        if (varDecl->initializer) {
+            inferType(varDecl->initializer.get());
+
+            if (!varDecl->typeStr.empty()) {
+                varDecl->resolvedType = MyType::parse(varDecl->typeStr);
+            } else {
+                varDecl->resolvedType = varDecl->initializer->exprType;
+            }
+        } else {
+            varDecl->resolvedType = MyType::parse(varDecl->typeStr);
+        }
+
+        symbolTable[varDecl->name] = varDecl->resolvedType;
+    }
+
+    shared_ptr<MyType> inferType(Expression* expr) {
+        if (expr->exprType) {
+            return expr->exprType;  // Already inferred
+        }
+
+        if (auto* var = dynamic_cast<Variable*>(expr)) {
+            auto it = symbolTable.find(var->name);
+            if (it != symbolTable.end()) {
+                expr->exprType = it->second;
+            } else {
+                expr->exprType = MyType::Int();  // Default fallback
+            }
+        }
+        else if (auto* binOp = dynamic_cast<BinaryOperation*>(expr)) {
+            auto leftType = inferType(binOp->left.get());
+            auto rightType = inferType(binOp->right.get());
+
+            if (binOp->op == TokenType::DOT) {
+                expr->exprType = MyType::String();
+            }
+            else if (binOp->op == TokenType::EQUAL_EQUAL || binOp->op == TokenType::BANG_EQUAL ||
+                     binOp->op == TokenType::LESS || binOp->op == TokenType::LESS_EQUAL ||
+                     binOp->op == TokenType::GREATER || binOp->op == TokenType::GREATER_EQUAL ||
+                     binOp->op == TokenType::AND || binOp->op == TokenType::OR) {
+                expr->exprType = MyType::Bool();
+            }
+            else {
+                expr->exprType = leftType;
+            }
+        }
+        else if (auto* unaryOp = dynamic_cast<UnaryOperation*>(expr)) {
+            auto operandType = inferType(unaryOp->operand.get());
+
+            if (unaryOp->op == TokenType::NOT) {
+                expr->exprType = MyType::Bool();
+            } else {
+                expr->exprType = operandType;
+            }
+        }
+        else if (auto* call = dynamic_cast<FunctionCall*>(expr)) {
+            if (call->name == "print") {
+                expr->exprType = MyType::Void();
+            } else {
+                auto it = functionTable.find(call->name);
+                if (it != functionTable.end()) {
+                    expr->exprType = it->second.returnType;
+
+                    const auto& paramTypes = it->second.paramTypes;
+                    for (size_t i = 0; i < call->arguments.size() && i < paramTypes.size(); i++) {
+                        inferType(call->arguments[i].get());
+
+                        // Coerce null -> Optional Type
+                        if (call->arguments[i]->exprType->kind == TypeKind::Null &&
+                            paramTypes[i]->kind == TypeKind::Optional) {
+                            // Setze den Typ des Arguments auf den erwarteten Optional-Typ
+                            call->arguments[i]->exprType = paramTypes[i];
+                            }
+                    }
+                } else {
+                    expr->exprType = MyType::Int();
+                }
+            }
+
+            // Infer argument types
+            for (const auto& arg : call->arguments) {
+                inferType(arg.get());
+            }
+        }
+        else if (auto* assign = dynamic_cast<Assignment*>(expr)) {
+            inferType(assign->value.get());
+            expr->exprType = assign->value->exprType;
+        }
+
+        if (!expr->exprType) {
+            expr->exprType = MyType::Int();
+        }
+
+        return expr->exprType;
+    }
+};
 
 class Parser {
 public:
@@ -642,14 +939,12 @@ public:
         current(0),
         reporter(reporter)
     {
-        //
     }
 
     unique_ptr<Program> parse() {
         auto program = make_unique<Program>();
 
         while (!isAtEnd()) {
-            // Skip newlines and DEDENT tokens at top level
             while (match({TokenType::NEWLINE})) {}
             while (match({TokenType::DEDENT})) {}
 
@@ -716,10 +1011,8 @@ private:
     Token consume(TokenType type, const string& message) {
         if (check(type)) return advance();
 
-        // Finde das letzte nicht-whitespace Token für bessere Fehlerposition
         Token errorToken = previous();
 
-        // Skip zurück über NEWLINE tokens
         size_t pos = current - 1;
         while (pos > 0 && tokens[pos].type == TokenType::NEWLINE) {
             pos--;
@@ -728,7 +1021,6 @@ private:
             errorToken = tokens[pos];
         }
 
-        // Erstelle informative Fehlermeldung
         string fullMessage = message;
         Token nextToken = peek();
 
@@ -738,6 +1030,37 @@ private:
 
         reporter.error(errorToken.location, fullMessage);
         throw runtime_error("Parse error");
+    }
+
+    string parseType() {
+        string baseType;
+
+        if (match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
+            baseType = previous().lexeme;
+        }
+        else if (match(TokenType::IDENTIFIER)) {
+            baseType = previous().lexeme;
+        }
+        else {
+            reportError("Expected type");
+        }
+
+        bool isArray = false;
+        if (match(TokenType::LEFT_BRACKET)) {
+            consume(TokenType::RIGHT_BRACKET, "Expected ']'");
+            isArray = true;
+        }
+
+        bool isOptional = false;
+        if (match(TokenType::QUESTION)) {
+            isOptional = true;
+        }
+
+        string fullType = baseType;
+        if (isArray) fullType += "[]";
+        if (isOptional) fullType += "?";
+
+        return fullType;
     }
 
     void reportError(const string& message) {
@@ -767,79 +1090,59 @@ private:
         }
     }
 
-    // Statement parsing
-
     unique_ptr<Statement> parseStatement() {
-        // Function: fn add(a: int, b: int) -> int:
         if (match(TokenType::FN)) {
             return parseFunctionDeclaration();
         }
 
-        // Variable: var x = 5
         if (match(TokenType::VAR)) {
             return parseVarDeclaration();
         }
 
-        // If: if x > 5:
         if (match(TokenType::IF)) {
             return parseIfStatement();
         }
 
-        // While: while x < 10:
         if (match(TokenType::WHILE)) {
             return parseWhileStatement();
         }
 
-        // Return: return 42
         if (match(TokenType::RETURN)) {
             return parseReturnStatement();
         }
 
-        // Expression statement
         return parseExpressionStatement();
     }
 
-    // Parse Function Declaration
     unique_ptr<Statement> parseFunctionDeclaration() {
         Token name = consume(TokenType::IDENTIFIER, "Expected function name");
 
         consume(TokenType::LEFT_PAREN, "Expected '(' after function name");
 
-        // Parse parameters
         vector<Parameter> parameters;
         if (!check(TokenType::RIGHT_PAREN)) {
             do {
                 Token paramName = consume(TokenType::IDENTIFIER, "Expected parameter name");
                 consume(TokenType::COLON, "Expected ':' after parameter name");
 
-                if (!match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
-                    reportError("Expected type after ':'");
-                }
-                Token paramType = previous();
-                parameters.emplace_back(paramName.lexeme, paramType.lexeme);
+                string paramType = parseType();
+                parameters.emplace_back(paramName.lexeme, paramType);
             } while (match(TokenType::COMMA));
         }
 
         consume(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
 
-        // Parse return type (optional)
         string returnType = "void";
         if (match(TokenType::ARROW)) {
-            if (!match({TokenType::INT, TokenType::FLOAT, TokenType::STRING, TokenType::BOOL, TokenType::VOID})) {
-                throw runtime_error("Expected return type after '->'");
-            }
-            returnType = previous().lexeme;
+            returnType = parseType();
         }
 
         consume(TokenType::COLON, "Expected ':' after function signature");
 
-        // Skip all newlines
         while (match(TokenType::NEWLINE)) {}
 
-        // Parse body (indented block)
         vector<unique_ptr<Statement>> body = parseBlock();
 
-        // Erstelle die FunctionDeclaration
         auto funcDecl = make_unique<FunctionDeclaration>(
             name.lexeme,
             std::move(parameters),
@@ -847,18 +1150,15 @@ private:
             std::move(body)
         );
 
-        // Validiere Return-Pfade
         ReturnPathAnalyzer::validateFunction(funcDecl.get());
 
         return funcDecl;
     }
 
-    // Parse If Statement
     unique_ptr<Statement> parseIfStatement() {
         auto condition = parseExpression();
         consume(TokenType::COLON, "Expected ':' after if condition");
 
-        // Skip all newlines
         while (match(TokenType::NEWLINE)) {}
 
         vector<unique_ptr<Statement> > thenBranch = parseBlock();
@@ -877,12 +1177,10 @@ private:
         );
     }
 
-    // Parse While Statement
     unique_ptr<Statement> parseWhileStatement() {
         auto condition = parseExpression();
         consume(TokenType::COLON, "Expected ':' after while condition");
 
-        // Skip all newlines
         while (match(TokenType::NEWLINE)) {}
 
         vector<unique_ptr<Statement> > body = parseBlock();
@@ -896,24 +1194,18 @@ private:
     vector<unique_ptr<Statement>> parseBlock() {
         vector<unique_ptr<Statement>> statements;
 
-        // Expect INDENT at start of block
         consume(TokenType::INDENT, "Expected indentation after ':'");
 
-        // Skip initial newlines
         while (match(TokenType::NEWLINE)) {}
 
-        // Parse statements until DEDENT
         while (!isAtEnd()) {
-            // Check for DEDENT - das ist das Ende des Blocks
             if (check(TokenType::DEDENT)) {
-                advance(); // consume the DEDENT
+                advance();
                 break;
             }
 
-            // Skip empty lines
             while (match(TokenType::NEWLINE)) {}
 
-            // Check again after skipping newlines
             if (check(TokenType::DEDENT)) {
                 advance();
                 break;
@@ -923,7 +1215,6 @@ private:
                 break;
             }
 
-            // Parse the statement
             statements.push_back(parseStatement());
         }
 
@@ -935,10 +1226,8 @@ private:
 
         string type;
 
-        // Optional type annotation
         if (match(TokenType::COLON)) {
-            Token typeToken = advance();
-            type = typeToken.lexeme;
+            type = parseType();
         }
 
         unique_ptr<Expression> initializer = nullptr;
@@ -972,9 +1261,6 @@ private:
         return make_unique<ExpressionStatement>(std::move(expression));
     }
 
-    // ==================
-    // Expression Parsing
-    // ==================
     unique_ptr<Expression> parseExpression() {
         return parseAssignment();
     }
@@ -982,16 +1268,14 @@ private:
     unique_ptr<Expression> parseAssignment() {
         auto expr = parseLogicalOr();
 
-        // Check for assignment
         if (match(TokenType::EQUAL)) {
-            // Left side must be a variable
             auto* var = dynamic_cast<Variable*>(expr.get());
             if (!var) {
                 reportError("Invalid assignment target");
             }
 
             string name = var->name;
-            auto value = parseAssignment(); // Right associative
+            auto value = parseAssignment();
             return make_unique<Assignment>(name, std::move(value));
         }
 
@@ -1022,7 +1306,6 @@ private:
         return expr;
     }
 
-    // Comparison: ==, !=, <, >, <=, >=
     unique_ptr<Expression> parseComparison() {
         auto expr = parseAddition();
 
@@ -1078,7 +1361,7 @@ private:
     unique_ptr<Expression> parseUnary() {
         if (match({TokenType::MINUS, TokenType::NOT})) {
             TokenType op = previous().type;
-            auto operand = parseUnary(); // Recursive for multiple unary ops
+            auto operand = parseUnary();
             return make_unique<UnaryOperation>(op, std::move(operand));
         }
 
@@ -1086,31 +1369,29 @@ private:
     }
 
     unique_ptr<Expression> parsePrimary() {
-        // true/false
         if (match(TokenType::TRUE)) {
             return make_unique<BoolLiteral>(true);
         }
         if (match(TokenType::FALSE)) {
             return make_unique<BoolLiteral>(false);
         }
+        if (match(TokenType::NONE)) {
+            return make_unique<NullLiteral>();
+        }
 
-        // Integer: 42
         if (match(TokenType::INTEGER_LITERAL)) {
             int value = stoi(previous().lexeme);
             return make_unique<IntLiteral>(value);
         }
 
-        // String: "text"
         if (match(TokenType::STRING_LITERAL)) {
-            return make_unique<::StringLiteral>(previous().lexeme);
+            return make_unique<MyStringLiteral>(previous().lexeme);
         }
 
-        // Interpolated String: @"Hello {name}"
         if (match(TokenType::INTERPOLATED_STRING)) {
             string template_str = previous().lexeme;
             vector<string> variables;
 
-            // Extract variable names from template
             size_t pos = 0;
             while ((pos = template_str.find('{', pos)) != string::npos) {
                 size_t end = template_str.find('}', pos);
@@ -1126,15 +1407,12 @@ private:
             return make_unique<InterpolatedString>(template_str, std::move(variables));
         }
 
-        // Variable oder Function Call
         if (match(TokenType::IDENTIFIER)) {
             string name = previous().lexeme;
 
-            // Function Call: add(5, 3)
             if (match(TokenType::LEFT_PAREN)) {
                 vector<unique_ptr<Expression>> arguments;
 
-                // Parse arguments
                 if (!check(TokenType::RIGHT_PAREN)) {
                     do {
                         arguments.push_back(parseExpression());
@@ -1145,11 +1423,9 @@ private:
                 return make_unique<FunctionCall>(name, std::move(arguments));
             }
 
-            // Just a variable
             return make_unique<Variable>(name);
         }
 
-        // Grouped: (5 + 3)
         if (match(TokenType::LEFT_PAREN)) {
             auto expression = parseExpression();
             consume(TokenType::RIGHT_PAREN, "Expected ')' after expression");
@@ -1163,11 +1439,6 @@ private:
 
 string tokenTypeToString(TokenType type) {
     switch (type) {
-
-        // ======================
-        // Keywords
-        // ======================
-
         case TokenType::NAMESPACE: return "NAMESPACE";
         case TokenType::USE: return "USE";
         case TokenType::CLASS: return "CLASS";
@@ -1204,22 +1475,13 @@ string tokenTypeToString(TokenType type) {
         case TokenType::CATCH: return "CATCH";
         case TokenType::FINALLY: return "FINALLY";
         case TokenType::THROW: return "THROW";
-
-        // ======================
-        // Types
-        // ======================
-
         case TokenType::INT: return "INT";
         case TokenType::FLOAT: return "FLOAT";
         case TokenType::STRING: return "STRING";
         case TokenType::BOOL: return "BOOL";
         case TokenType::VOID: return "VOID";
         case TokenType::ANY: return "ANY";
-
-        // ======================
-        // Literals
-        // ======================
-
+        case TokenType::QUESTION: return "QUESTION";
         case TokenType::TRUE: return "TRUE";
         case TokenType::FALSE: return "FALSE";
         case TokenType::NONE: return "NONE";
@@ -1228,11 +1490,6 @@ string tokenTypeToString(TokenType type) {
         case TokenType::FLOAT_LITERAL: return "FLOAT_LITERAL";
         case TokenType::STRING_LITERAL: return "STRING_LITERAL";
         case TokenType::INTERPOLATED_STRING: return "INTERPOLATED_STRING";
-
-        // ======================
-        // Operators
-        // ======================
-
         case TokenType::PLUS: return "PLUS";
         case TokenType::MINUS: return "MINUS";
         case TokenType::STAR: return "STAR";
@@ -1249,22 +1506,12 @@ string tokenTypeToString(TokenType type) {
         case TokenType::MINUS_EQUAL: return "MINUS_EQUAL";
         case TokenType::STAR_EQUAL: return "STAR_EQUAL";
         case TokenType::SLASH_EQUAL: return "SLASH_EQUAL";
-
-        // ======================
-        // Logical
-        // ======================
-
         case TokenType::AND: return "AND";
         case TokenType::OR: return "OR";
         case TokenType::NOT: return "NOT";
         case TokenType::IS: return "IS";
         case TokenType::AS: return "AS";
         case TokenType::IN: return "IN";
-
-        // ======================
-        // Delimeters
-        // ======================
-
         case TokenType::LEFT_PAREN: return "LEFT_PAREN";
         case TokenType::RIGHT_PAREN: return "RIGHT_PAREN";
         case TokenType::LEFT_BRACE: return "LEFT_BRACE";
@@ -1278,16 +1525,10 @@ string tokenTypeToString(TokenType type) {
         case TokenType::ARROW: return "ARROW";
         case TokenType::FAT_ARROW: return "FAT_ARROW";
         case TokenType::DOUBLE_COLON: return "DOUBLE_COLON";
-
-        // ======================
-        // Special
-        // ======================
-
         case TokenType::NEWLINE: return "NEWLINE";
         case TokenType::INDENT: return "INDENT";
         case TokenType::DEDENT: return "DEDENT";
         case TokenType::EOF_TOKEN: return "EOF_TOKEN";
-
         default: return "UNKNOWN";
     }
 }
@@ -1300,6 +1541,7 @@ ostream& operator<<(ostream& os, const Token& token) {
     return os;
 }
 
+// Lexer bleibt unverändert...
 class Lexer
 {
 public:
@@ -1385,6 +1627,7 @@ unordered_map<string, TokenType> Lexer::keywords = {
     {"void", TokenType::VOID},
     {"and", TokenType::AND},
     {"or", TokenType::OR},
+    {"null", TokenType::NONE},
 };
 
 Lexer::Lexer(const string& source, ExceptionReporter& reporter) : source(source), reporter(reporter) {}
@@ -1397,7 +1640,6 @@ vector<Token> Lexer::tokenize() {
             }
             scanToken();
         } catch (const runtime_error &e) {
-            // Error already reported, try to continue
             advance();
         }
     }
@@ -1452,12 +1694,9 @@ void Lexer::scanToken() {
         case ' ':
         case '\r':
         case '\t':
-            // Skip whitespace only if not at line start
             if (!atLineStart) {
-                // Just skip
             } else {
-                // Don't skip - handleIndentation() will process it
-                current--;  // Go back
+                current--;
                 column--;
                 handleIndentation();
             }
@@ -1477,6 +1716,7 @@ void Lexer::scanToken() {
             else {
                 addToken(TokenType::PLUS, "+");
             }
+            atLineStart = false;
             break;
 
         case '-':
@@ -1489,6 +1729,7 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::MINUS, "-");
             }
+            atLineStart = false;
             break;
 
         case '&':
@@ -1496,6 +1737,7 @@ void Lexer::scanToken() {
                 advance();
                 addToken(TokenType::AND, "&&");
             }
+            atLineStart = false;
             break;
 
         case '|':
@@ -1503,6 +1745,7 @@ void Lexer::scanToken() {
                 advance();
                 addToken(TokenType::OR, "||");
             }
+            atLineStart = false;
             break;
 
         case '*':
@@ -1512,15 +1755,21 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::STAR, "*");
             }
+            atLineStart = false;
             break;
 
         case '%':
             addToken(TokenType::PERCENT, "%");
+            atLineStart = false;
+            break;
+
+        case '?':
+            addToken(TokenType::QUESTION, "?");
+            atLineStart = false;
             break;
 
         case '/':
             if (peek() == '/') {
-                // Single line comment.
                 scanComment();
             } else if (peek() == '*') {
                 advance();
@@ -1535,6 +1784,7 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::SLASH, "/");
             }
+            atLineStart = false;
             break;
 
         case '<':
@@ -1544,6 +1794,7 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::LESS, "<");
             }
+            atLineStart = false;
             break;
 
         case '>':
@@ -1553,6 +1804,7 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::GREATER, ">");
             }
+            atLineStart = false;
             break;
 
         case '!':
@@ -1560,38 +1812,47 @@ void Lexer::scanToken() {
                 advance();
                 addToken(TokenType::BANG_EQUAL, "!=");
             }
+            atLineStart = false;
             break;
 
         case '(':
             addToken(TokenType::LEFT_PAREN, "(");
+            atLineStart = false;
             break;
 
         case ')':
             addToken(TokenType::RIGHT_PAREN, ")");
+            atLineStart = false;
             break;
 
         case '{':
             addToken(TokenType::LEFT_BRACE, "{");
+            atLineStart = false;
             break;
 
         case '}':
             addToken(TokenType::RIGHT_BRACE, "}");
+            atLineStart = false;
             break;
 
         case '[':
             addToken(TokenType::LEFT_BRACKET, "[");
+            atLineStart = false;
             break;
 
         case ']':
             addToken(TokenType::RIGHT_BRACKET, "]");
+            atLineStart = false;
             break;
 
         case ',':
             addToken(TokenType::COMMA, ",");
+            atLineStart = false;
             break;
 
         case '.':
             addToken(TokenType::DOT, ".");
+            atLineStart = false;
             break;
 
         case ':':
@@ -1601,6 +1862,7 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::COLON, ":");
             }
+            atLineStart = false;
             break;
 
         case '=':
@@ -1613,10 +1875,12 @@ void Lexer::scanToken() {
             } else {
                 addToken(TokenType::EQUAL, "=");
             }
+            atLineStart = false;
             break;
 
         case '"':
             scanString();
+            atLineStart = false;
             break;
 
         case '#':
@@ -1628,19 +1892,23 @@ void Lexer::scanToken() {
                 advance();
                 scanInterpolatedString();
             }
+            atLineStart = false;
             break;
 
         default:
             if (isDigit(c)) {
-                current--; // Go back
+                current--;
                 column--;
                 scanNumber();
+                atLineStart = false;
             } else if (isAlpha(c)) {
                 current--;
                 column--;
                 scanIdentifier();
+                atLineStart = false;
             } else {
                 addToken(TokenType::UNKNOWN, std::string(1, c));
+                atLineStart = false;
             }
             break;
     }
@@ -1653,7 +1921,6 @@ void Lexer::scanNumber() {
         advance();
     }
 
-    // Check for decimal
     bool isFloat = false;
     if (peek() == '.' && isDigit(peekNext())) {
         isFloat = true;
@@ -1681,7 +1948,7 @@ void Lexer::scanString() {
         throw runtime_error("Unterminated string");
     }
 
-    advance(); // closing "
+    advance();
 
     string str = source.substr(start, current - start - 1);
     addToken(TokenType::STRING_LITERAL, str);
@@ -1696,7 +1963,6 @@ void Lexer::scanIdentifier() {
 
     string text = source.substr(start, current - start);
 
-    // Check if keyword
     auto it = keywords.find(text);
     if (it != keywords.end()) {
         addToken(it->second, text);
@@ -1717,10 +1983,8 @@ void Lexer::scanInterpolatedString() {
 
     while (peek() != '"' && !isAtEnd()) {
         if (peek() == '{') {
-            // Variable reference found
-            advance(); // consume {
+            advance();
 
-            // Read variable name
             size_t varStart = current;
             while (isAlphaNumeric(peek()) && peek() != '}') {
                 advance();
@@ -1733,9 +1997,9 @@ void Lexer::scanInterpolatedString() {
             }
 
             string varName = source.substr(varStart, current - varStart);
-            result += "{" + varName + "}"; // Keep the placeholder
+            result += "{" + varName + "}";
 
-            advance(); // consume }
+            advance();
         } else {
             result += peek();
             advance();
@@ -1748,7 +2012,7 @@ void Lexer::scanInterpolatedString() {
         throw runtime_error("Unterminated interpolated string");
     }
 
-    advance(); // closing "
+    advance();
 
     addToken(TokenType::INTERPOLATED_STRING, result);
 }
@@ -1758,17 +2022,15 @@ void Lexer::handleIndentation() {
 
     int spaces = 0;
 
-    // Count leading spaces/tabs
     while (peek() == ' ' || peek() == '\t') {
         if (peek() == '\t') {
-            spaces += 4;  // Tab = 4 spaces
+            spaces += 4;
         } else {
             spaces += 1;
         }
         advance();
     }
 
-    // Skip empty lines and comments
     if (peek() == '\n' || peek() == '#') {
         return;
     }
@@ -1776,21 +2038,17 @@ void Lexer::handleIndentation() {
     currentIndent = spaces;
     atLineStart = false;
 
-    // Compare with previous indent level
     int previousIndent = indentStack.back();
 
     if (currentIndent > previousIndent) {
-        // INDENT: Deeper nesting
         indentStack.push_back(currentIndent);
         addToken(TokenType::INDENT, "INDENT");
     } else if (currentIndent < previousIndent) {
-        // DEDENT: Coming back out
         while (!indentStack.empty() && indentStack.back() > currentIndent) {
             indentStack.pop_back();
             addToken(TokenType::DEDENT, "DEDENT");
         }
 
-        // Check for indentation error
         if (indentStack.empty() || indentStack.back() != currentIndent) {
             SourceLocation location(line, 1, currentIndent);
             reporter.error(location, "Inconsistent indentation");
@@ -1812,7 +2070,7 @@ bool Lexer::isAlphaNumeric(char c) const {
 }
 
 // ======================
-// LLVM Code Generator
+// LLVM Code Generator (VEREINFACHT!)
 // ======================
 
 class CodeGenerator {
@@ -1821,17 +2079,15 @@ public:
         : context(make_unique<LLVMContext>()),
           builder(make_unique<IRBuilder<>>(*context)),
           module(make_unique<Module>("mylang", *context)) {
-        // Initialize LLVM
         InitializeNativeTarget();
         InitializeNativeTargetAsmPrinter();
         InitializeNativeTargetAsmParser();
     }
 
     void declarePrintf() {
-        // Deklariere printf: int printf(char*, ...)
         FunctionType* printfType = FunctionType::get(
-            Type::getInt32Ty(*context),
-            {PointerType::get(Type::getInt8Ty(*context), 0)},
+            llvm::Type::getInt32Ty(*context),
+            {PointerType::get(llvm::Type::getInt8Ty(*context), 0)},
             true
         );
 
@@ -1844,18 +2100,16 @@ public:
     }
 
     void declareFunction(FunctionDeclaration* funcDecl) {
-        // Build parameter types
-        vector<Type*> paramTypes;
+        vector<llvm::Type*> paramTypes;
         for (const auto& param : funcDecl->parameters) {
-            paramTypes.push_back(getType(param.type));
+            paramTypes.push_back(param.resolvedType->toLLVMType(*context));
         }
 
-        // Build function type
-        Type* returnType;
+        llvm::Type* returnType;
         if (funcDecl->name == "main") {
-            returnType = Type::getInt32Ty(*context);
+            returnType = llvm::Type::getInt32Ty(*context);
         } else {
-            returnType = getType(funcDecl->returnType);
+            returnType = funcDecl->resolvedReturnType->toLLVMType(*context);
         }
         FunctionType* funcType = FunctionType::get(returnType, paramTypes, false);
 
@@ -1865,7 +2119,6 @@ public:
             mangledName = "c_" + mangledName;
         }
 
-        // Create function (without body)
         Function* function = Function::Create(
             funcType,
             Function::ExternalLinkage,
@@ -1873,58 +2126,52 @@ public:
             module.get()
         );
 
-        // Store in function table
         string tableName = mangleFunctionName(funcDecl->name, funcDecl->parameters);
         functions[tableName] = function;
     }
 
     void declareStringFunctions() {
-        // strlen
         FunctionType* strlenType = FunctionType::get(
-            Type::getInt64Ty(*context),
-            {PointerType::get(Type::getInt8Ty(*context), 0)},
+            llvm::Type::getInt64Ty(*context),
+            {PointerType::get(llvm::Type::getInt8Ty(*context), 0)},
             false
         );
         Function::Create(strlenType, Function::ExternalLinkage, "strlen", module.get());
 
-        // malloc
         FunctionType* mallocType = FunctionType::get(
-            PointerType::get(Type::getInt8Ty(*context), 0),
-            {Type::getInt64Ty(*context)},
+            PointerType::get(llvm::Type::getInt8Ty(*context), 0),
+            {llvm::Type::getInt64Ty(*context)},
             false
         );
         Function::Create(mallocType, Function::ExternalLinkage, "malloc", module.get());
 
-        // strcpy
         FunctionType* strcpyType = FunctionType::get(
-            PointerType::get(Type::getInt8Ty(*context), 0),
+            PointerType::get(llvm::Type::getInt8Ty(*context), 0),
             {
-                PointerType::get(Type::getInt8Ty(*context), 0),
-                PointerType::get(Type::getInt8Ty(*context), 0)
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0),
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0)
             },
             false
         );
         Function::Create(strcpyType, Function::ExternalLinkage, "strcpy", module.get());
 
-        // strcat
         FunctionType* strcatType = FunctionType::get(
-            PointerType::get(Type::getInt8Ty(*context), 0),
+            PointerType::get(llvm::Type::getInt8Ty(*context), 0),
             {
-                PointerType::get(Type::getInt8Ty(*context), 0),
-                PointerType::get(Type::getInt8Ty(*context), 0)
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0),
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0)
             },
             false
         );
         Function::Create(strcatType, Function::ExternalLinkage, "strcat", module.get());
 
-        // sprintf (für int/bool zu string conversion)
         FunctionType* sprintfType = FunctionType::get(
-            Type::getInt32Ty(*context),
+            llvm::Type::getInt32Ty(*context),
             {
-                PointerType::get(Type::getInt8Ty(*context), 0),
-                PointerType::get(Type::getInt8Ty(*context), 0)
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0),
+                PointerType::get(llvm::Type::getInt8Ty(*context), 0)
             },
-            true  // varargs
+            true
         );
         Function::Create(sprintfType, Function::ExternalLinkage, "sprintf", module.get());
     }
@@ -1933,14 +2180,12 @@ public:
         declarePrintf();
         declareStringFunctions();
 
-        // Step 1: Collect all functions (signatures only)
         for (const auto& stmt : program.statements) {
             if (auto* funcDecl = dynamic_cast<FunctionDeclaration*>(stmt.get())) {
                 declareFunction(funcDecl);
             }
         }
 
-        // Step 2: Generate function bodies
         for (const auto& stmt : program.statements) {
             generateStatement(stmt.get());
         }
@@ -1951,7 +2196,6 @@ public:
     }
 
     void writeObjectFile(const string& filename) {
-        // Get target triple
         auto targetTriple = sys::getDefaultTargetTriple();
         module->setTargetTriple(Triple(targetTriple));
 
@@ -1973,7 +2217,6 @@ public:
 
         module->setDataLayout(machine->createDataLayout());
 
-        // Open output file
         error_code EC;
         raw_fd_ostream dest(filename, EC, sys::fs::OF_None);
 
@@ -1982,7 +2225,6 @@ public:
             return;
         }
 
-        // Emit object file
         legacy::PassManager pass;
         auto fileType = CodeGenFileType::ObjectFile;
 
@@ -2000,38 +2242,11 @@ private:
     unique_ptr<IRBuilder<> > builder;
     unique_ptr<Module> module;
 
-    // Symbol table: variable name -> LLVM Value*
     unordered_map<string, Value *> namedValues;
-
-    // Function table: function name -> LLVM Function*
     unordered_map<string, Function *> functions;
-
-    // Current function being compiled
     Function *currentFunction = nullptr;
 
-    // ========================================================================
-    // Type Conversion
-    // ========================================================================
-
-    Type *getType(const string &typeName) {
-        if (typeName == "int") {
-            return Type::getInt32Ty(*context);
-        } else if (typeName == "bool") {
-            return Type::getInt1Ty(*context);
-        } else if (typeName == "float") {
-            return Type::getDoubleTy(*context);
-        } else if (typeName == "void") {
-            return Type::getVoidTy(*context);
-        } else if (typeName == "string") {
-            return PointerType::getUnqual(*context);
-        }
-
-        // Default to int
-        return Type::getInt32Ty(*context);
-    }
-
     string mangleFunctionName(const string& name, const vector<Parameter>& parameters) {
-        // Never mangle main function.
         if (name == "main") {
             return "main";
         }
@@ -2039,10 +2254,17 @@ private:
         string mangledName = name;
 
         for (const auto& parameter : parameters) {
-            mangledName += "_" + parameter.type;
+            string typeName = parameter.typeStr;
+            // Normalize: Entferne Spaces, ersetze ? und []
+            typeName.erase(remove(typeName.begin(), typeName.end(), ' '), typeName.end());
+            for (char& c : typeName) {
+                if (c == '?' || c == '[' || c == ']') {
+                    c = '_';
+                }
+            }
+            mangledName += "_" + typeName;
         }
 
-        // Add "_void" if no parameter is defined.
         if (parameters.empty()) {
             mangledName += "_void";
         }
@@ -2050,7 +2272,7 @@ private:
         return mangledName;
     }
 
-    string mangleFunctionName(const string& name, const vector<string>& paramTypes) {
+    string mangleFunctionName(const string& name, const vector<shared_ptr<MyType>>& paramTypes) {
         if (name == "main") {
             return "main";
         }
@@ -2058,51 +2280,23 @@ private:
         string mangledName = name;
 
         for (const auto& type : paramTypes) {
-            mangledName += "_" + type;
+            string typeName = type->toString();
+            // WICHTIG: GLEICHE Normalisierung wie oben!
+            typeName.erase(remove(typeName.begin(), typeName.end(), ' '), typeName.end());
+            for (char& c : typeName) {
+                if (c == '?' || c == '[' || c == ']') {
+                    c = '_';
+                }
+            }
+            mangledName += "_" + typeName;
         }
 
-        // Add "_void" if no param type was defined.
         if (paramTypes.empty()) {
             mangledName += "_void";
         }
 
         return mangledName;
     }
-
-    string getExpressionType(Expression* expr) {
-        if (dynamic_cast<IntLiteral*>(expr)) {
-            return "int";
-        }
-        else if (dynamic_cast<BoolLiteral*>(expr)) {
-            return "bool";
-        }
-        else if (dynamic_cast<::StringLiteral*>(expr)) {
-            return "string";
-        }
-        else if (auto* var = dynamic_cast<Variable*>(expr)) {
-            // Schaue in die Symbol-Tabelle
-            Value* varPtr = namedValues[var->name];
-            if (!varPtr) return "int"; // Default
-
-            if (auto* allocaInst = dyn_cast<AllocaInst>(varPtr)) {
-                Type* type = allocaInst->getAllocatedType();
-                if (type->isIntegerTy(32)) return "int";
-                if (type->isIntegerTy(1)) return "bool";
-                if (type->isDoubleTy()) return "float";
-                if (type->isPointerTy()) return "string";
-            }
-        }
-        else if (auto* binOp = dynamic_cast<BinaryOperation*>(expr)) {
-            // Meiste binäre Operatoren geben den Typ der Operanden zurück
-            return getExpressionType(binOp->left.get());
-        }
-
-        return "int"; // Default
-    }
-
-    // ========================================================================
-    // Statement Generation
-    // ========================================================================
 
     void generateStatement(Statement *stmt) {
         if (auto *funcDecl = dynamic_cast<FunctionDeclaration *>(stmt)) {
@@ -2128,45 +2322,32 @@ private:
         }
     }
 
-    // ========================================================================
-    // Function Generation
-    // ========================================================================
-
     void generateFunction(FunctionDeclaration* funcDecl) {
-        // Get the already-declared function
         string mangledName = mangleFunctionName(funcDecl->name, funcDecl->parameters);
         Function* function = functions[mangledName];
         currentFunction = function;
 
-        // Create entry block
         BasicBlock* entryBlock = BasicBlock::Create(*context, "entry", function);
         builder->SetInsertPoint(entryBlock);
 
-        // Create allocas for parameters and store initial values
         for (auto& arg : function->args()) {
-            // Set parameter name
             arg.setName(funcDecl->parameters[arg.getArgNo()].name);
 
-            // Create alloca for this parameter
             AllocaInst* alloca = builder->CreateAlloca(
                 arg.getType(),
                 nullptr,
                 arg.getName()
             );
 
-            // Store the parameter value
             builder->CreateStore(&arg, alloca);
 
-            // Add to symbol table
             namedValues[std::string(arg.getName())] = alloca;
         }
 
-        // Generate function body
         for (const auto& stmt : funcDecl->body) {
             generateStatement(stmt.get());
         }
 
-        // Add default return if missing
         BasicBlock* currentBlock = builder->GetInsertBlock();
         if (currentBlock && !currentBlock->getTerminator()) {
             if (funcDecl->name == "main") {
@@ -2178,42 +2359,43 @@ private:
             }
         }
 
-        // Verify function
         verifyFunction(*function, &errs());
 
-        // Clear local symbol table
         namedValues.clear();
         currentFunction = nullptr;
     }
 
     void generateVariableDeclaration(VariableDeclaration* varDecl) {
-        // Create alloca instruction in entry block
         Function* function = builder->GetInsertBlock()->getParent();
         IRBuilder<> tmpBuilder(&function->getEntryBlock(), function->getEntryBlock().begin());
 
-        Type* type = nullptr;
+        // VEREINFACHT: Type ist bereits resolved!
+        llvm::Type* type = varDecl->resolvedType->toLLVMType(*context);
         Value* initValue = nullptr;
 
-        // Generate initializer first if present
         if (varDecl->initializer) {
             initValue = generateExpression(varDecl->initializer.get());
 
-            // If no type specified, infer from initializer
-            if (varDecl->type.empty()) {
-                type = initValue->getType();
-            } else {
-                type = getType(varDecl->type);
+            // Optional boxing
+            if (varDecl->resolvedType->kind == TypeKind::Optional &&
+                varDecl->initializer->exprType->kind != TypeKind::Optional &&
+                varDecl->initializer->exprType->kind != TypeKind::Null) {
+
+                Function* mallocFunc = module->getFunction("malloc");
+                Value* size = ConstantExpr::getSizeOf(initValue->getType());
+                Value* ptr = builder->CreateCall(mallocFunc, {size}, "boxed");
+                Value* typedPtr = builder->CreateBitCast(ptr, type);
+                builder->CreateStore(initValue, typedPtr);
+                initValue = typedPtr;
             }
         } else {
-            // No initializer, must have explicit type
-            type = getType(varDecl->type.empty() ? "int" : varDecl->type);
-
-            // Default value
-            if (type->isIntegerTy(32)) {
+            // Default values
+            if (varDecl->resolvedType->kind == TypeKind::Int) {
                 initValue = ConstantInt::get(*context, APInt(32, 0));
-            } else if (type->isIntegerTy(1)) {
+            } else if (varDecl->resolvedType->kind == TypeKind::Bool) {
                 initValue = ConstantInt::get(*context, APInt(1, 0));
-            } else if (type->isPointerTy()) {
+            } else if (varDecl->resolvedType->kind == TypeKind::Optional ||
+                       varDecl->resolvedType->kind == TypeKind::String) {
                 initValue = ConstantPointerNull::get(cast<PointerType>(type));
             }
         }
@@ -2224,13 +2406,8 @@ private:
             builder->CreateStore(initValue, alloca);
         }
 
-        // Store the alloca in symbol table
         namedValues[varDecl->name] = alloca;
     }
-
-    // ========================================================================
-    // Return Statement
-    // ========================================================================
 
     void generateReturn(ReturnStatement* returnStmt) {
         if (returnStmt->value) {
@@ -2241,14 +2418,9 @@ private:
         }
     }
 
-    // ========================================================================
-    // If Statement
-    // ========================================================================
-
     void generateIf(IfStatement *ifStmt) {
         Value *condition = generateExpression(ifStmt->condition.get());
 
-        // Convert to boolean if needed
         if (!condition->getType()->isIntegerTy(1)) {
             condition = builder->CreateICmpNE(
                 condition,
@@ -2259,13 +2431,9 @@ private:
 
         Function *function = builder->GetInsertBlock()->getParent();
 
-        // Create blocks
         BasicBlock *thenBB = BasicBlock::Create(*context, "then", function);
         BasicBlock *elseBB = nullptr;
         BasicBlock *mergeBB = nullptr;
-
-        // Nur merge-Block erstellen wenn nötig
-        bool needsMerge = true;
 
         if (!ifStmt->elseBranch.empty()) {
             elseBB = BasicBlock::Create(*context, "else");
@@ -2273,17 +2441,14 @@ private:
         } else {
             mergeBB = BasicBlock::Create(*context, "ifcont");
             builder->CreateCondBr(condition, thenBB, mergeBB);
-            needsMerge = true; // Wir haben schon einen merge-Block
         }
 
-        // Then block
         builder->SetInsertPoint(thenBB);
         for (const auto &stmt: ifStmt->thenBranch) {
             generateStatement(stmt.get());
         }
         bool thenHasTerminator = builder->GetInsertBlock()->getTerminator() != nullptr;
 
-        // Else block
         bool elseHasTerminator = false;
         if (!ifStmt->elseBranch.empty()) {
             function->insert(function->end(), elseBB);
@@ -2294,11 +2459,8 @@ private:
             elseHasTerminator = builder->GetInsertBlock()->getTerminator() != nullptr;
         }
 
-        // Merge block logic
         if (!ifStmt->elseBranch.empty()) {
-            // If-else statement
             if (!thenHasTerminator || !elseHasTerminator) {
-                // At least one branch needs to jump to merge
                 mergeBB = BasicBlock::Create(*context, "ifcont");
 
                 if (!thenHasTerminator) {
@@ -2315,7 +2477,6 @@ private:
                 builder->SetInsertPoint(mergeBB);
             }
         } else {
-            // Simple if without else
             if (!thenHasTerminator) {
                 builder->SetInsertPoint(thenBB);
                 builder->CreateBr(mergeBB);
@@ -2325,10 +2486,6 @@ private:
         }
     }
 
-    // ========================================================================
-    // While Statement
-    // ========================================================================
-
     void generateWhile(WhileStatement* whileStmt) {
         Function* function = builder->GetInsertBlock()->getParent();
 
@@ -2336,10 +2493,8 @@ private:
         BasicBlock* loopBB = BasicBlock::Create(*context, "whileloop");
         BasicBlock* afterBB = BasicBlock::Create(*context, "afterloop");
 
-        // Jump to condition
         builder->CreateBr(condBB);
 
-        // Condition block
         builder->SetInsertPoint(condBB);
         Value* condition = generateExpression(whileStmt->condition.get());
 
@@ -2353,7 +2508,6 @@ private:
 
         builder->CreateCondBr(condition, loopBB, afterBB);
 
-        // Loop body
         function->insert(function->end(), loopBB);
         builder->SetInsertPoint(loopBB);
         for (const auto& stmt : whileStmt->body) {
@@ -2361,24 +2515,28 @@ private:
         }
         builder->CreateBr(condBB);
 
-        // After loop
         function->insert(function->end(), afterBB);
         builder->SetInsertPoint(afterBB);
     }
 
-    // ========================================================================
-    // Expression Generation
-    // ========================================================================
-
+    // VEREINFACHT: Nutzt exprType direkt!
     Value* generateExpression(Expression* expr) {
+        if (!expr->exprType) {
+            errs() << "Expression has no type!\n";
+            return nullptr;
+        }
+
         if (auto* intLit = dynamic_cast<IntLiteral*>(expr)) {
             return ConstantInt::get(*context, APInt(32, intLit->value));
         }
         else if (auto* boolLit = dynamic_cast<BoolLiteral*>(expr)) {
             return ConstantInt::get(*context, APInt(1, boolLit->value ? 1 : 0));
         }
-        else if (auto* strLit = dynamic_cast<::StringLiteral*>(expr)) {
+        else if (auto* strLit = dynamic_cast<MyStringLiteral*>(expr)) {
             return builder->CreateGlobalStringPtr(strLit->value);
+        }
+        else if (dynamic_cast<NullLiteral*>(expr)) {
+            return ConstantPointerNull::get(PointerType::getUnqual(*context));
         }
         else if (auto* interpStr = dynamic_cast<InterpolatedString*>(expr)) {
             return generateInterpolatedString(interpStr);
@@ -2390,8 +2548,6 @@ private:
                 return nullptr;
             }
 
-            // Load the value from memory
-            // In LLVM 21+ müssen wir den Typ aus der AllocaInst holen
             if (auto* allocaInst = dyn_cast<AllocaInst>(varPtr)) {
                 return builder->CreateLoad(
                     allocaInst->getAllocatedType(),
@@ -2399,7 +2555,6 @@ private:
                     var->name.c_str()
                 );
             } else {
-                // Falls es ein Argument ist (sollte nicht vorkommen nach unseren Änderungen)
                 return varPtr;
             }
         }
@@ -2432,19 +2587,16 @@ private:
 
         if (!left || !right) return nullptr;
 
-        // Convert to string if needed
-        left = convertToString(left);
-        right = convertToString(right);
+        left = convertToString(left, binOp->left->exprType);
+        right = convertToString(right, binOp->right->exprType);
 
         if (!left || !right) return nullptr;
 
-        // Get string functions
         Function *strlenFunc = module->getFunction("strlen");
         Function *mallocFunc = module->getFunction("malloc");
         Function *strcpyFunc = module->getFunction("strcpy");
         Function *strcatFunc = module->getFunction("strcat");
 
-        // Calculate total length: len(left) + len(right) + 1
         Value *len1 = builder->CreateCall(strlenFunc, {left}, "len1");
         Value *len2 = builder->CreateCall(strlenFunc, {right}, "len2");
         Value *totalLen = builder->CreateAdd(len1, len2, "totallen");
@@ -2454,13 +2606,9 @@ private:
             "totallen_plus1"
         );
 
-        // Allocate memory
         Value *result = builder->CreateCall(mallocFunc, {totalLen}, "concat_result");
 
-        // Copy first string
         builder->CreateCall(strcpyFunc, {result, left});
-
-        // Concatenate second string
         builder->CreateCall(strcatFunc, {result, right});
 
         return result;
@@ -2480,6 +2628,20 @@ private:
 
         if (!left || !right) return nullptr;
 
+        if (binOp->op == TokenType::EQUAL_EQUAL) {
+            if (left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+                return builder->CreateICmpEQ(left, right, "ptreqtmp");
+            }
+            return builder->CreateICmpEQ(left, right, "eqtmp");
+        }
+
+        if (binOp->op == TokenType::BANG_EQUAL) {
+            if (left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+                return builder->CreateICmpNE(left, right, "ptrnetmp");
+            }
+            return builder->CreateICmpNE(left, right, "netmp");
+        }
+
         switch (binOp->op) {
             case TokenType::PLUS:
                 return builder->CreateAdd(left, right, "addtmp");
@@ -2491,10 +2653,6 @@ private:
                 return builder->CreateSDiv(left, right, "divtmp");
             case TokenType::PERCENT:
                 return builder->CreateSRem(left, right, "modtmp");
-            case TokenType::EQUAL_EQUAL:
-                return builder->CreateICmpEQ(left, right, "eqtmp");
-            case TokenType::BANG_EQUAL:
-                return builder->CreateICmpNE(left, right, "netmp");
             case TokenType::LESS:
                 return builder->CreateICmpSLT(left, right, "lttmp");
             case TokenType::LESS_EQUAL:
@@ -2517,17 +2675,14 @@ private:
         size_t pos = 0;
 
         while ((pos = template_str.find('{', lastPos)) != string::npos) {
-            // Add literal part before variable
             if (pos > lastPos) {
                 string literal = template_str.substr(lastPos, pos - lastPos);
                 parts.push_back(builder->CreateGlobalStringPtr(literal));
             }
 
-            // Find variable name
             size_t end = template_str.find('}', pos);
             string varName = template_str.substr(pos + 1, end - pos - 1);
 
-            // Get variable value and convert to string
             Value* varPtr = namedValues[varName];
             if (!varPtr) {
                 errs() << "Unknown variable in interpolation: " << varName << "\n";
@@ -2543,27 +2698,37 @@ private:
                 );
             }
 
-            // Convert to string
-            Value* strValue = convertToString(varValue);
+            // Finde Type aus Symbol Table (müsste eigentlich auch in Expression gespeichert sein)
+            shared_ptr<MyType> varType = MyType::Int(); // Default
+            for (const auto& [name, type] : namedValues) {
+                if (name == varName) {
+                    if (auto* ai = dyn_cast<AllocaInst>(varPtr)) {
+                        llvm::Type* llvmType = ai->getAllocatedType();
+                        if (llvmType->isIntegerTy(32)) varType = MyType::Int();
+                        else if (llvmType->isIntegerTy(1)) varType = MyType::Bool();
+                        else if (llvmType->isPointerTy()) varType = MyType::String();
+                    }
+                    break;
+                }
+            }
+
+            Value* strValue = convertToString(varValue, varType);
             parts.push_back(strValue);
 
             lastPos = end + 1;
         }
 
-        // Add remaining literal part
         if (lastPos < template_str.length()) {
             string literal = template_str.substr(lastPos);
             parts.push_back(builder->CreateGlobalStringPtr(literal));
         }
 
-        // Concatenate all parts
         if (parts.empty()) {
             return builder->CreateGlobalStringPtr("");
         }
 
         Value* result = parts[0];
         for (size_t i = 1; i < parts.size(); i++) {
-            // Use existing concatenation logic
             Function *strlenFunc = module->getFunction("strlen");
             Function *mallocFunc = module->getFunction("malloc");
             Function *strcpyFunc = module->getFunction("strcpy");
@@ -2590,7 +2755,6 @@ private:
 
         switch (unaryOp->op) {
             case TokenType::MINUS:
-                // Negate: 0 - operand
                 if (operand->getType()->isIntegerTy()) {
                     return builder->CreateNeg(operand, "negtmp");
                 } else if (operand->getType()->isDoubleTy()) {
@@ -2598,7 +2762,6 @@ private:
                 }
                 break;
             case TokenType::NOT:
-                // Logical NOT
                 return builder->CreateNot(operand, "nottmp");
             default:
                 errs() << "Unknown unary operator\n";
@@ -2610,11 +2773,9 @@ private:
     Value *generateLogicalOp(BinaryOperation *binOp) {
         Function *function = builder->GetInsertBlock()->getParent();
 
-        // Evaluate left side
         Value *left = generateExpression(binOp->left.get());
         if (!left) return nullptr;
 
-        // Convert to i1 if needed
         if (!left->getType()->isIntegerTy(1)) {
             left = builder->CreateICmpNE(
                 left,
@@ -2628,20 +2789,16 @@ private:
         BasicBlock *mergeBB = BasicBlock::Create(*context, "logical_merge");
 
         if (binOp->op == TokenType::AND) {
-            // AND: only evaluate right if left is true
             builder->CreateCondBr(left, rightBB, mergeBB);
         } else {
-            // OR: only evaluate right if left is false
             builder->CreateCondBr(left, mergeBB, rightBB);
         }
 
-        // Right block
         function->insert(function->end(), rightBB);
         builder->SetInsertPoint(rightBB);
         Value *right = generateExpression(binOp->right.get());
         if (!right) return nullptr;
 
-        // Convert to i1 if needed
         if (!right->getType()->isIntegerTy(1)) {
             right = builder->CreateICmpNE(
                 right,
@@ -2653,18 +2810,15 @@ private:
         BasicBlock *rightEndBB = builder->GetInsertBlock();
         builder->CreateBr(mergeBB);
 
-        // Merge block
         function->insert(function->end(), mergeBB);
         builder->SetInsertPoint(mergeBB);
 
-        PHINode *phi = builder->CreatePHI(Type::getInt1Ty(*context), 2, "logical_result");
+        PHINode *phi = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "logical_result");
 
         if (binOp->op == TokenType::AND) {
-            // AND: false from start, or result from right
             phi->addIncoming(ConstantInt::getFalse(*context), startBB);
             phi->addIncoming(right, rightEndBB);
         } else {
-            // OR: true from start, or result from right
             phi->addIncoming(ConstantInt::getTrue(*context), startBB);
             phi->addIncoming(right, rightEndBB);
         }
@@ -2680,26 +2834,81 @@ private:
             return nullptr;
         }
 
-        // Get the first argument
         Value* arg = generateExpression(call->arguments[0].get());
         if (!arg) return nullptr;
+
+        shared_ptr<MyType> argType = call->arguments[0]->exprType;
 
         Value* formatStr = nullptr;
         vector<Value*> printfArgs;
 
-        // Determine format string based on type
-        if (arg->getType()->isIntegerTy(32)) {
-            // Integer
+        // Handle optional types: unwrap or print "null"
+        if (argType->kind == TypeKind::Optional) {
+            // Check if null
+            Value* isNull = builder->CreateICmpEQ(arg, ConstantPointerNull::get(cast<PointerType>(arg->getType())));
+
+            Function* function = builder->GetInsertBlock()->getParent();
+            BasicBlock* nullBB = BasicBlock::Create(*context, "print_null");
+            BasicBlock* valueBB = BasicBlock::Create(*context, "print_value");
+            BasicBlock* contBB = BasicBlock::Create(*context, "print_cont");
+
+            builder->CreateCondBr(isNull, nullBB, valueBB);
+
+            // Null branch: print "null"
+            function->insert(function->end(), nullBB);
+            builder->SetInsertPoint(nullBB);
+            Value* nullStr = builder->CreateGlobalStringPtr("null\n");
+            builder->CreateCall(printfFunc, {nullStr});
+            builder->CreateBr(contBB);
+
+            // Value branch: unwrap and print
+            function->insert(function->end(), valueBB);
+            builder->SetInsertPoint(valueBB);
+
+            // Unwrap: load from pointer
+            Value* unwrapped = builder->CreateLoad(
+                argType->elementType->toLLVMType(*context),
+                arg,
+                "unwrapped"
+            );
+
+            // Print based on inner type
+            if (argType->elementType->kind == TypeKind::Int) {
+                formatStr = builder->CreateGlobalStringPtr("%d\n");
+                builder->CreateCall(printfFunc, {formatStr, unwrapped});
+            } else if (argType->elementType->kind == TypeKind::Bool) {
+                Value* boolAsInt = builder->CreateZExt(unwrapped, llvm::Type::getInt32Ty(*context));
+                Value* trueStr = builder->CreateGlobalStringPtr("true");
+                Value* falseStr = builder->CreateGlobalStringPtr("false");
+                Value* isTrue = builder->CreateICmpNE(boolAsInt, ConstantInt::get(*context, APInt(32, 0)));
+                Value* selectedStr = builder->CreateSelect(isTrue, trueStr, falseStr);
+                formatStr = builder->CreateGlobalStringPtr("%s\n");
+                builder->CreateCall(printfFunc, {formatStr, selectedStr});
+            } else if (argType->elementType->kind == TypeKind::String) {
+                // String is already a pointer, load gives us the string pointer
+                formatStr = builder->CreateGlobalStringPtr("%s\n");
+                builder->CreateCall(printfFunc, {formatStr, unwrapped});
+            }
+
+            builder->CreateBr(contBB);
+
+            // Continue
+            function->insert(function->end(), contBB);
+            builder->SetInsertPoint(contBB);
+
+            return nullptr;
+        }
+
+        // Non-optional types (original code)
+        if (argType->kind == TypeKind::Int) {
             formatStr = builder->CreateGlobalStringPtr("%d\n");
             printfArgs.push_back(formatStr);
             printfArgs.push_back(arg);
-        } else if (arg->getType()->isIntegerTy(1)) {
-            // Boolean - convert to i32 first for comparison
-            Value* boolAsInt = builder->CreateZExt(arg, Type::getInt32Ty(*context), "booltoint");
+        } else if (argType->kind == TypeKind::Bool) {
+            Value* boolAsInt = builder->CreateZExt(arg, llvm::Type::getInt32Ty(*context), "booltoint");
             Value* trueStr = builder->CreateGlobalStringPtr("true");
             Value* falseStr = builder->CreateGlobalStringPtr("false");
 
-            // Compare with 0
             Value* isTrue = builder->CreateICmpNE(
                 boolAsInt,
                 ConstantInt::get(*context, APInt(32, 0))
@@ -2709,17 +2918,16 @@ private:
             formatStr = builder->CreateGlobalStringPtr("%s\n");
             printfArgs.push_back(formatStr);
             printfArgs.push_back(selectedStr);
-        } else if (arg->getType()->isDoubleTy()) {
-            // Float
+        } else if (argType->kind == TypeKind::Float) {
             formatStr = builder->CreateGlobalStringPtr("%f\n");
             printfArgs.push_back(formatStr);
             printfArgs.push_back(arg);
-        } else if (arg->getType()->isPointerTy()) {
+        } else if (argType->kind == TypeKind::String) {
             formatStr = builder->CreateGlobalStringPtr("%s\n");
             printfArgs.push_back(formatStr);
             printfArgs.push_back(arg);
         } else {
-            errs() << "Unsupported type for print()\n";
+            errs() << "Unsupported type for print(): " << argType->toString() << "\n";
             return nullptr;
         }
 
@@ -2727,21 +2935,22 @@ private:
     }
 
     Value* generateFunctionCall(FunctionCall* call) {
-        // Special handling for print()
         if (call->name == "print") {
             return generatePrint(call);
         }
 
-        vector<string> argTypes;
+        // Generiere argument types
+        vector<shared_ptr<MyType>> argTypes;
         for (const auto& arg : call->arguments) {
-            argTypes.push_back(getExpressionType(arg.get()));
+            argTypes.push_back(arg->exprType);
         }
 
         string mangledName = mangleFunctionName(call->name, argTypes);
 
         Function* calleeF = functions[mangledName];
         if (!calleeF) {
-            errs() << "Unknown function: " << call->name << "\n";
+            errs() << "Unknown function: " << call->name
+                   << " (mangled: " << mangledName << ")\n";
             return nullptr;
         }
 
@@ -2756,7 +2965,6 @@ private:
             if (!args.back()) return nullptr;
         }
 
-        // Wenn Funktion void zurückgibt, gib nullptr zurück
         if (calleeF->getReturnType()->isVoidTy()) {
             builder->CreateCall(calleeF, args);
             return nullptr;
@@ -2765,34 +2973,30 @@ private:
         return builder->CreateCall(calleeF, args, "calltmp");
     }
 
-    // Helper: Convert any value to string
-    Value* convertToString(Value* val) {
-        if (!val) return nullptr;
+    // VEREINFACHT: mit Type parameter!
+    Value* convertToString(Value* val, shared_ptr<MyType> type) {
+        if (!val || !type) return nullptr;
 
-        // Already a string pointer
-        if (val->getType()->isPointerTy()) {
+        if (type->kind == TypeKind::String) {
             return val;
         }
 
         Function* mallocFunc = module->getFunction("malloc");
         Function* sprintfFunc = module->getFunction("sprintf");
 
-        // Allocate buffer (32 bytes should be enough for int/bool/float)
         Value* buffer = builder->CreateCall(
             mallocFunc,
             {ConstantInt::get(*context, APInt(64, 32))},
             "str_buffer"
         );
 
-        if (val->getType()->isIntegerTy(32)) {
-            // Convert int to string
+        if (type->kind == TypeKind::Int) {
             Value* format = builder->CreateGlobalStringPtr("%d");
             builder->CreateCall(sprintfFunc, {buffer, format, val});
             return buffer;
         }
-        else if (val->getType()->isIntegerTy(1)) {
-            // Convert bool to string
-            Value* boolAsInt = builder->CreateZExt(val, Type::getInt32Ty(*context));
+        else if (type->kind == TypeKind::Bool) {
+            Value* boolAsInt = builder->CreateZExt(val, llvm::Type::getInt32Ty(*context));
             Value* trueStr = builder->CreateGlobalStringPtr("true");
             Value* falseStr = builder->CreateGlobalStringPtr("false");
             Value* isTrue = builder->CreateICmpNE(
@@ -2801,14 +3005,13 @@ private:
             );
             return builder->CreateSelect(isTrue, trueStr, falseStr);
         }
-        else if (val->getType()->isDoubleTy()) {
-            // Convert float to string
+        else if (type->kind == TypeKind::Float) {
             Value* format = builder->CreateGlobalStringPtr("%.2f");
             builder->CreateCall(sprintfFunc, {buffer, format, val});
             return buffer;
         }
 
-        errs() << "Cannot convert type to string\n";
+        errs() << "Cannot convert type to string: " << type->toString() << "\n";
         return nullptr;
     }
 };
@@ -2825,7 +3028,6 @@ int main(int argc, char* argv[]) {
     bool debug = false;
     bool run = true;
 
-    // Parse command line options
     for (int i = 2; i < argc; i++) {
         if (string(argv[i]) == "-o" && i + 1 < argc) {
             executableFile = argv[i + 1];
@@ -2837,7 +3039,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Read source file
     ifstream file(inputFile);
     if (!file) {
         cerr << "Could not open file: " << inputFile << endl;
@@ -2851,7 +3052,6 @@ int main(int argc, char* argv[]) {
     ExceptionReporter reporter(source, inputFile);
 
     try {
-        // Lexer
         Lexer lexer(source, reporter);
         auto tokens = lexer.tokenize();
 
@@ -2867,7 +3067,6 @@ int main(int argc, char* argv[]) {
             cout << endl;
         }
 
-        // Parser
         Parser parser(tokens, reporter);
         auto program = parser.parse();
 
@@ -2881,7 +3080,14 @@ int main(int argc, char* argv[]) {
             cout << endl;
         }
 
-        // Code Generator
+        // NEU: Type Checking Pass!
+        TypeChecker typeChecker(reporter);
+        typeChecker.check(program.get());
+
+        if (reporter.hasError()) {
+            return 1;
+        }
+
         if (debug) {
             cout << "=== LLVM IR ===" << endl;
         }
@@ -2894,11 +3100,9 @@ int main(int argc, char* argv[]) {
             cout << endl;
         }
 
-        // Write object file
         codegen.writeObjectFile(outputFile);
 
         if (run) {
-            // Link with clang
             string linkCommand = "clang " + outputFile + " -o " + executableFile + " 2>/dev/null";
             int linkResult = system(linkCommand.c_str());
 
@@ -2907,15 +3111,12 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            // Execute
             string execCommand = "./" + executableFile;
             int execResult = system(execCommand.c_str());
 
-            // Cleanup
             remove(outputFile.c_str());
             remove(executableFile.c_str());
 
-            // Return the exit code from the program
             return WEXITSTATUS(execResult);
         }
 
