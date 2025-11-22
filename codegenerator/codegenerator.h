@@ -1146,7 +1146,7 @@ private:
                 Value *intFormat = builder->CreateGlobalStringPtr("%d");
                 builder->CreateCall(printfFunc, {intFormat, element});
             } else if (argType->elementType->kind == TypeKind::String) {
-                Value *strFormat = builder->CreateGlobalStringPtr("%s");
+                Value *strFormat = builder->CreateGlobalStringPtr("\"%s\"");
                 builder->CreateCall(printfFunc, {strFormat, element});
             } else if (argType->elementType->kind == TypeKind::Bool) {
                 Value *boolAsInt = builder->CreateZExt(element, llvm::Type::getInt32Ty(*context));
