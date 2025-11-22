@@ -493,6 +493,9 @@ private:
         else if (auto* interpStr = dynamic_cast<InterpolatedString*>(expr)) {
             return generateInterpolatedString(interpStr);
         }
+        else if (auto* arrayLiteral = dynamic_cast<ArrayLiteral*>(expr)) {
+            return generateArrayLiteral(arrayLiteral);
+        }
         else if (auto* var = dynamic_cast<Variable*>(expr)) {
             Value* varPtr = namedValues[var->name];
             if (!varPtr) {
@@ -701,6 +704,92 @@ private:
         return result;
     }
 
+    Value *generateArrayLiteral(ArrayLiteral *arrayLit) {
+        if (arrayLit->elements.empty()) {
+            // Leeres Array
+            Function *mallocFunc = module->getFunction("malloc");
+
+            // Struct: {i32 length, element_type* data}
+            llvm::Type *elementType = arrayLit->exprType->elementType->toLLVMType(*context);
+            vector<llvm::Type *> fields = {
+                llvm::Type::getInt32Ty(*context),
+                PointerType::get(elementType, 0)
+            };
+            StructType *arrayStructType = StructType::create(*context, fields,
+                                                             "array_" + arrayLit->exprType->elementType->toString());
+
+            Value *arrayPtr = builder->CreateCall(
+                mallocFunc,
+                {ConstantExpr::getSizeOf(arrayStructType)},
+                "empty_array"
+            );
+            Value *typedArrayPtr = builder->CreateBitCast(arrayPtr, PointerType::get(arrayStructType, 0));
+
+            // Setze length = 0
+            Value *lengthPtr = builder->CreateStructGEP(arrayStructType, typedArrayPtr, 0, "length_ptr");
+            builder->CreateStore(ConstantInt::get(*context, APInt(32, 0)), lengthPtr);
+
+            // Setze data = null
+            Value *dataPtr = builder->CreateStructGEP(arrayStructType, typedArrayPtr, 1, "data_ptr");
+            builder->CreateStore(ConstantPointerNull::get(PointerType::get(elementType, 0)), dataPtr);
+
+            return typedArrayPtr;
+        }
+
+        // Array mit Elementen
+        size_t numElements = arrayLit->elements.size();
+        llvm::Type *elementType = arrayLit->elements[0]->exprType->toLLVMType(*context);
+
+        Function *mallocFunc = module->getFunction("malloc");
+
+        // Allokiere Speicher für die Elemente
+        Value *elementSize = ConstantExpr::getSizeOf(elementType);
+        Value *totalSize = builder->CreateMul(
+            elementSize,
+            ConstantInt::get(*context, APInt(64, numElements)),
+            "total_size"
+        );
+        Value *dataPtr = builder->CreateCall(mallocFunc, {totalSize}, "array_data");
+        Value *typedDataPtr = builder->CreateBitCast(dataPtr, PointerType::get(elementType, 0));
+
+        // Fülle die Elemente
+        for (size_t i = 0; i < numElements; i++) {
+            Value *element = generateExpression(arrayLit->elements[i].get());
+            Value *elementPtr = builder->CreateGEP(
+                elementType,
+                typedDataPtr,
+                ConstantInt::get(*context, APInt(64, i)),
+                "element_ptr"
+            );
+            builder->CreateStore(element, elementPtr);
+        }
+
+        // Erstelle Array-Struct: {i32 length, element_type* data}
+        vector<llvm::Type *> fields = {
+            llvm::Type::getInt32Ty(*context),
+            PointerType::get(elementType, 0)
+        };
+        StructType *arrayStructType = StructType::create(*context, fields,
+                                                         "array_" + arrayLit->exprType->elementType->toString());
+
+        Value *arrayStructPtr = builder->CreateCall(
+            mallocFunc,
+            {ConstantExpr::getSizeOf(arrayStructType)},
+            "array_struct"
+        );
+        Value *typedArrayPtr = builder->CreateBitCast(arrayStructPtr, PointerType::get(arrayStructType, 0));
+
+        // Setze length
+        Value *lengthPtr = builder->CreateStructGEP(arrayStructType, typedArrayPtr, 0, "length_ptr");
+        builder->CreateStore(ConstantInt::get(*context, APInt(32, numElements)), lengthPtr);
+
+        // Setze data pointer
+        Value *dataPtrField = builder->CreateStructGEP(arrayStructType, typedArrayPtr, 1, "data_ptr");
+        builder->CreateStore(typedDataPtr, dataPtrField);
+
+        return typedArrayPtr;
+    }
+
     Value* generateUnaryOp(UnaryOperation* unaryOp) {
         Value* operand = generateExpression(unaryOp->operand.get());
         if (!operand) return nullptr;
@@ -840,6 +929,96 @@ private:
                 // String is already a pointer, load gives us the string pointer
                 formatStr = builder->CreateGlobalStringPtr("%s\n");
                 builder->CreateCall(printfFunc, {formatStr, unwrapped});
+            } else if (argType->kind == TypeKind::Array) {
+                // Print array: [element1, element2, ...]
+                Function *function = builder->GetInsertBlock()->getParent();
+
+                // Load array struct
+                llvm::Type *arrayStructType = argType->toLLVMType(*context);
+
+                // Get length
+                Value *lengthPtr = builder->CreateStructGEP(arrayStructType, arg, 0, "length_ptr");
+                Value *length = builder->CreateLoad(llvm::Type::getInt32Ty(*context), lengthPtr, "length");
+
+                // Get data pointer
+                Value *dataPtrField = builder->CreateStructGEP(arrayStructType, arg, 1, "data_ptr");
+                llvm::Type *elementType = argType->elementType->toLLVMType(*context);
+                Value *dataPtr = builder->CreateLoad(PointerType::get(elementType, 0), dataPtrField, "data");
+
+                // Print opening bracket
+                Value *openBracket = builder->CreateGlobalStringPtr("[");
+                builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), openBracket});
+
+                // Loop through elements
+                BasicBlock *loopCondBB = BasicBlock::Create(*context, "array_loop_cond");
+                BasicBlock *loopBodyBB = BasicBlock::Create(*context, "array_loop_body");
+                BasicBlock *loopEndBB = BasicBlock::Create(*context, "array_loop_end");
+
+                // Initialize counter
+                AllocaInst *counterAlloca = builder->CreateAlloca(llvm::Type::getInt32Ty(*context), nullptr, "counter");
+                builder->CreateStore(ConstantInt::get(*context, APInt(32, 0)), counterAlloca);
+                builder->CreateBr(loopCondBB);
+
+                // Loop condition
+                function->insert(function->end(), loopCondBB);
+                builder->SetInsertPoint(loopCondBB);
+                Value *counter = builder->CreateLoad(llvm::Type::getInt32Ty(*context), counterAlloca, "i");
+                Value *cond = builder->CreateICmpSLT(counter, length, "loop_cond");
+                builder->CreateCondBr(cond, loopBodyBB, loopEndBB);
+
+                // Loop body
+                function->insert(function->end(), loopBodyBB);
+                builder->SetInsertPoint(loopBodyBB);
+
+                // Print separator if not first element
+                BasicBlock *printSepBB = BasicBlock::Create(*context, "print_sep");
+                BasicBlock *skipSepBB = BasicBlock::Create(*context, "skip_sep");
+                Value *isFirst = builder->CreateICmpEQ(counter, ConstantInt::get(*context, APInt(32, 0)));
+                builder->CreateCondBr(isFirst, skipSepBB, printSepBB);
+
+                function->insert(function->end(), printSepBB);
+                builder->SetInsertPoint(printSepBB);
+                Value *separator = builder->CreateGlobalStringPtr(", ");
+                builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), separator});
+                builder->CreateBr(skipSepBB);
+
+                function->insert(function->end(), skipSepBB);
+                builder->SetInsertPoint(skipSepBB);
+
+                // Load and print element
+                Value *elementPtr = builder->CreateGEP(elementType, dataPtr, counter, "element_ptr");
+                Value *element = builder->CreateLoad(elementType, elementPtr, "element");
+
+                // Print based on element type
+                if (argType->elementType->kind == TypeKind::Int) {
+                    Value *intFormat = builder->CreateGlobalStringPtr("%d");
+                    builder->CreateCall(printfFunc, {intFormat, element});
+                } else if (argType->elementType->kind == TypeKind::String) {
+                    Value *strFormat = builder->CreateGlobalStringPtr("%s");
+                    builder->CreateCall(printfFunc, {strFormat, element});
+                } else if (argType->elementType->kind == TypeKind::Bool) {
+                    Value *boolAsInt = builder->CreateZExt(element, llvm::Type::getInt32Ty(*context));
+                    Value *trueStr = builder->CreateGlobalStringPtr("true");
+                    Value *falseStr = builder->CreateGlobalStringPtr("false");
+                    Value *isTrue = builder->CreateICmpNE(boolAsInt, ConstantInt::get(*context, APInt(32, 0)));
+                    Value *selectedStr = builder->CreateSelect(isTrue, trueStr, falseStr);
+                    builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), selectedStr});
+                }
+
+                // Increment counter
+                Value *nextCounter = builder->CreateAdd(counter, ConstantInt::get(*context, APInt(32, 1)));
+                builder->CreateStore(nextCounter, counterAlloca);
+                builder->CreateBr(loopCondBB);
+
+                // Loop end
+                function->insert(function->end(), loopEndBB);
+                builder->SetInsertPoint(loopEndBB);
+
+                // Print closing bracket and newline
+                Value *closeBracket = builder->CreateGlobalStringPtr("]\n");
+                builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), closeBracket});
+
+                return nullptr;
             }
 
             builder->CreateBr(contBB);
@@ -878,6 +1057,120 @@ private:
             formatStr = builder->CreateGlobalStringPtr("%s\n");
             printfArgs.push_back(formatStr);
             printfArgs.push_back(arg);
+        } else if (argType->kind == TypeKind::Array) {
+            Function* function = builder->GetInsertBlock()->getParent();
+
+            // Wir brauchen den POINTER zur Variable, nicht den geladenen Wert
+            // arg ist bereits geladen, also holen wir uns den Pointer zurück
+            Value *arrayVarPtr = nullptr;
+
+            // Wenn das Argument eine Variable ist, holen wir den Pointer direkt
+            if (auto *varExpr = dynamic_cast<Variable *>(call->arguments[0].get())) {
+                arrayVarPtr = namedValues[varExpr->name];
+            } else {
+                // Fallback: erstelle temporäre Variable
+                AllocaInst *tempAlloca = builder->CreateAlloca(arg->getType(), nullptr, "temp_array");
+                builder->CreateStore(arg, tempAlloca);
+                arrayVarPtr = tempAlloca;
+            }
+
+            // Load the array struct pointer from the variable
+            llvm::Type *elementType = argType->elementType->toLLVMType(*context);
+            vector<llvm::Type *> fields = {
+                llvm::Type::getInt32Ty(*context),
+                PointerType::get(elementType, 0)
+            };
+            StructType *arrayStructType = StructType::create(*context, fields,
+                                                             "array_print_" + argType->elementType->toString());
+
+            Value *arrayStructPtr = builder->CreateLoad(
+                PointerType::get(arrayStructType, 0),
+                arrayVarPtr,
+                "array_struct_ptr"
+            );
+
+            // Get length
+            Value *lengthPtr = builder->CreateStructGEP(arrayStructType, arrayStructPtr, 0, "length_ptr");
+            Value *length = builder->CreateLoad(llvm::Type::getInt32Ty(*context), lengthPtr, "length");
+
+            // Get data pointer
+            Value *dataPtrField = builder->CreateStructGEP(arrayStructType, arrayStructPtr, 1, "data_ptr");
+            Value *dataPtr = builder->CreateLoad(PointerType::get(elementType, 0), dataPtrField, "data");
+
+            // Print opening bracket
+            Value *openBracket = builder->CreateGlobalStringPtr("[");
+            builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), openBracket});
+
+            // Loop through elements
+            BasicBlock *loopCondBB = BasicBlock::Create(*context, "array_loop_cond");
+            BasicBlock *loopBodyBB = BasicBlock::Create(*context, "array_loop_body");
+            BasicBlock *loopEndBB = BasicBlock::Create(*context, "array_loop_end");
+
+            // Initialize counter
+            AllocaInst *counterAlloca = builder->CreateAlloca(llvm::Type::getInt32Ty(*context), nullptr, "counter");
+            builder->CreateStore(ConstantInt::get(*context, APInt(32, 0)), counterAlloca);
+            builder->CreateBr(loopCondBB);
+
+            // Loop condition
+            function->insert(function->end(), loopCondBB);
+            builder->SetInsertPoint(loopCondBB);
+            Value *counter = builder->CreateLoad(llvm::Type::getInt32Ty(*context), counterAlloca, "i");
+            Value *cond = builder->CreateICmpSLT(counter, length, "loop_cond");
+            builder->CreateCondBr(cond, loopBodyBB, loopEndBB);
+
+            // Loop body
+            function->insert(function->end(), loopBodyBB);
+            builder->SetInsertPoint(loopBodyBB);
+
+            // Print separator if not first element
+            BasicBlock *printSepBB = BasicBlock::Create(*context, "print_sep");
+            BasicBlock *skipSepBB = BasicBlock::Create(*context, "skip_sep");
+            Value *isFirst = builder->CreateICmpEQ(counter, ConstantInt::get(*context, APInt(32, 0)));
+            builder->CreateCondBr(isFirst, skipSepBB, printSepBB);
+
+            function->insert(function->end(), printSepBB);
+            builder->SetInsertPoint(printSepBB);
+            Value *separator = builder->CreateGlobalStringPtr(", ");
+            builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), separator});
+            builder->CreateBr(skipSepBB);
+
+            function->insert(function->end(), skipSepBB);
+            builder->SetInsertPoint(skipSepBB);
+
+            // Load and print element
+            Value *elementPtr = builder->CreateGEP(elementType, dataPtr, counter, "element_ptr");
+            Value *element = builder->CreateLoad(elementType, elementPtr, "element");
+
+            // Print based on element type
+            if (argType->elementType->kind == TypeKind::Int) {
+                Value *intFormat = builder->CreateGlobalStringPtr("%d");
+                builder->CreateCall(printfFunc, {intFormat, element});
+            } else if (argType->elementType->kind == TypeKind::String) {
+                Value *strFormat = builder->CreateGlobalStringPtr("%s");
+                builder->CreateCall(printfFunc, {strFormat, element});
+            } else if (argType->elementType->kind == TypeKind::Bool) {
+                Value *boolAsInt = builder->CreateZExt(element, llvm::Type::getInt32Ty(*context));
+                Value *trueStr = builder->CreateGlobalStringPtr("true");
+                Value *falseStr = builder->CreateGlobalStringPtr("false");
+                Value *isTrue = builder->CreateICmpNE(boolAsInt, ConstantInt::get(*context, APInt(32, 0)));
+                Value *selectedStr = builder->CreateSelect(isTrue, trueStr, falseStr);
+                builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), selectedStr});
+            }
+
+            // Increment counter
+            Value *nextCounter = builder->CreateAdd(counter, ConstantInt::get(*context, APInt(32, 1)));
+            builder->CreateStore(nextCounter, counterAlloca);
+            builder->CreateBr(loopCondBB);
+
+            // Loop end
+            function->insert(function->end(), loopEndBB);
+            builder->SetInsertPoint(loopEndBB);
+
+            // Print closing bracket and newline
+            Value *closeBracket = builder->CreateGlobalStringPtr("]\n");
+            builder->CreateCall(printfFunc, {builder->CreateGlobalStringPtr("%s"), closeBracket});
+
+            return nullptr;
         } else {
             errs() << "Unsupported type for print(): " << argType->toString() << "\n";
             return nullptr;

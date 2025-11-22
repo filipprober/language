@@ -503,6 +503,27 @@ private:
             return make_unique<InterpolatedString>(template_str, std::move(variables));
         }
 
+        if (match(TokenType::LEFT_BRACKET)) {
+            vector<unique_ptr<Expression>> elements;
+
+            if (!check(TokenType::RIGHT_BRACKET)) {
+                do {
+                    elements.push_back(parseExpression());
+                } while (match(TokenType::COMMA));
+            }
+
+            consume(TokenType::RIGHT_BRACKET, "Expected ']' after array elements");
+            auto arrayLit = make_unique<ArrayLiteral>(std::move(elements));
+
+            if (!arrayLit->elements.empty()) {
+                // Nimm den Type des ersten Elements als Element-Type
+                // (sollte eigentlich vom TypeChecker gemacht werden)
+                arrayLit->exprType = MyType::Array(arrayLit->elements[0]->exprType);
+            }
+
+            return arrayLit;
+        }
+
         if (match(TokenType::IDENTIFIER)) {
             string name = previous().lexeme;
 

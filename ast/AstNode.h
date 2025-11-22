@@ -340,6 +340,17 @@ public:
     void print(int indent = 0) const override;
 };
 
+class ArrayLiteral : public Expression
+{
+public:
+    vector<unique_ptr<Expression>> elements;
+
+    explicit ArrayLiteral(vector<unique_ptr<Expression>> elements) :
+        elements(std::move(elements)) {}
+
+    void print(int indent = 0) const override;
+};
+
 // ======================
 // Statements
 // ======================
@@ -591,4 +602,11 @@ inline void BoolLiteral::print(int indent) const {
 
 inline void NullLiteral::print(int indent) const {
     cout << string(indent, ' ') << "NullLiteral(null)" << endl;
+}
+
+inline void ArrayLiteral::print(int indent) const {
+    cout << string(indent, ' ') << "ArrayLiteral [" << elements.size() << " elements]" << endl;
+    for (const auto& element : elements) {
+        element->print(indent + 2);
+    }
 }
