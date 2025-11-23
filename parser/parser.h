@@ -362,10 +362,9 @@ private:
             returnType = parseType();
         }
 
-        consume(TokenType::COLON, "Expected ':' after method signature");
-
         vector<unique_ptr<Statement> > body;
         if (!isAbstract) {
+            consume(TokenType::COLON, "Expected ':' after method signature");
             while (match(TokenType::NEWLINE)) {
             }
             body = parseBlock();

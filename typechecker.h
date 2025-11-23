@@ -1,6 +1,8 @@
 #ifndef LANG_TYPECHECKER_H
 #define LANG_TYPECHECKER_H
 
+#include <map>
+
 using namespace std;
 
 class ReturnPathAnalyzer
@@ -65,10 +67,21 @@ public:
             }
         }
 
+        for (auto& stmt : program->statements) {
+            if (auto* iface = dynamic_cast<InterfaceDeclaration*>(stmt.get())) {
+                interfaces[iface->name] = iface;
+            }
+        }
+
         for (const auto& stmt : program->statements) {
             if (auto* classDecl = dynamic_cast<ClassDeclaration*>(stmt.get())) {
                 collectClass(classDecl);
+                classes[classDecl->name] = classDecl;
             }
+        }
+
+        for (const auto& [name, classDecl] : classes) {
+            validateInterfaceImplementation(classDecl);
         }
 
         // Pass 2: Type-check alle Statements
@@ -102,6 +115,8 @@ public:
 private:
     ExceptionReporter& reporter;
     unordered_map<string, shared_ptr<MyType>> symbolTable;
+    map<string, InterfaceDeclaration*> interfaces;
+    map<string, ClassDeclaration*> classes;
 
     struct FunctionSignature {
         vector<shared_ptr<MyType>> paramTypes;
@@ -336,6 +351,69 @@ private:
         }
 
         return expr->exprType;
+    }
+
+    void validateInterfaceImplementation(ClassDeclaration* classDecl) {
+        for (const auto& interfaceName : classDecl->interfaces) {
+            // Finde das Interface
+            auto it = interfaces.find(interfaceName);
+            if (it == interfaces.end()) {
+                reporter.error(SourceLocation(0, 0, 0), "Interface '" + interfaceName + "' not found");
+                continue;
+            }
+
+            InterfaceDeclaration* interface = it->second;
+
+            // Prüfe jede Interface-Methode
+            for (const auto& ifaceMethod : interface->methods) {
+                bool found = false;
+
+                // Suche die Methode in der Klasse
+                for (const auto& classMethod : classDecl->methods) {
+                    if (classMethod->name == ifaceMethod->name) {
+                        found = true;
+
+                        // Prüfe Signatur-Kompatibilität
+                        if (!methodSignaturesMatch(ifaceMethod.get(), classMethod.get())) {
+                            reporter.error(SourceLocation(0, 0, 0),
+                                "Method '" + classMethod->name + "' in class '" +
+                                classDecl->name + "' does not match interface '" +
+                                interfaceName + "' signature");
+                        }
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    reporter.error(
+                        SourceLocation(0, 0, 0),
+                        "Class '" + classDecl->name + "' does not implement method '" + ifaceMethod->name + "' from interface '" + interfaceName + "'"
+                        );
+                }
+            }
+        }
+    }
+
+    bool methodSignaturesMatch(MethodDeclaration* ifaceMethod, MethodDeclaration* classMethod) {
+        // Prüfe Return-Type
+        if (!ifaceMethod->resolvedReturnType->equals(classMethod->resolvedReturnType)) {
+            return false;
+        }
+
+        // Prüfe Parameter-Anzahl
+        if (ifaceMethod->parameters.size() != classMethod->parameters.size()) {
+            return false;
+        }
+
+        // Prüfe jeden Parameter
+        for (size_t i = 0; i < ifaceMethod->parameters.size(); i++) {
+            if (!ifaceMethod->parameters[i].resolvedType->equals(
+                    classMethod->parameters[i].resolvedType)) {
+                return false;
+                    }
+        }
+
+        return true;
     }
 };
 
