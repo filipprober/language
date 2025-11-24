@@ -43,7 +43,7 @@ public:
             if (isAtEnd()) break;
 
             try {
-                auto statement = parseStatement();
+                unique_ptr<Statement> statement = parseStatement();
                 if (statement) {
                     program->statements.push_back(std::move(statement));
                 }
@@ -197,6 +197,10 @@ private:
 
         if (match(TokenType::WHILE)) {
             return parseWhileStatement();
+        }
+
+        if (match(TokenType::BREAK)) {
+            return parseBreakStatement();
         }
 
         if (match(TokenType::RETURN)) {
@@ -452,6 +456,11 @@ private:
             std::move(condition),
             std::move(body)
         );
+    }
+
+    unique_ptr<Statement> parseBreakStatement() {
+        match(TokenType::NEWLINE);
+        return make_unique<BreakStatement>();
     }
 
     vector<unique_ptr<Statement>> parseBlock() {

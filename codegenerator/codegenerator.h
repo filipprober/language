@@ -397,6 +397,8 @@ private:
     unordered_map<string, ClassDeclaration*> classDecls;
     ClassDeclaration* currentClass = nullptr;
 
+    vector<BasicBlock*> loopExitStack;
+
     string mangleFunctionName(const string& name, const vector<Parameter>& parameters) {
         if (name == "main") {
             return "main";
@@ -473,6 +475,8 @@ private:
             generateIf(ifStmt);
         } else if (auto *whileStmt = dynamic_cast<WhileStatement *>(stmt)) {
             generateWhile(whileStmt);
+        } else if (auto *breakStatement = dynamic_cast<BreakStatement *>(stmt)) {
+            generateBreak(breakStatement);
         } else if (auto *exprStmt = dynamic_cast<ExpressionStatement *>(stmt)) {
             generateExpression(exprStmt->expression.get());
         }
@@ -642,12 +646,25 @@ private:
         }
     }
 
+    void generateBreak(BreakStatement* breakStatement) {
+        if (loopExitStack.empty()) {
+            errs() << "break statement outside of loop\n";
+            return;
+        }
+
+        BasicBlock* exitBlock = loopExitStack.back();
+        builder->CreateBr(exitBlock);
+    }
+
     void generateWhile(WhileStatement* whileStmt) {
         Function* function = builder->GetInsertBlock()->getParent();
 
         BasicBlock* condBB = BasicBlock::Create(*context, "whilecond", function);
         BasicBlock* loopBB = BasicBlock::Create(*context, "whileloop");
         BasicBlock* afterBB = BasicBlock::Create(*context, "afterloop");
+
+        // Push exit block to stack
+        loopExitStack.push_back(afterBB);
 
         builder->CreateBr(condBB);
 
@@ -666,10 +683,16 @@ private:
 
         function->insert(function->end(), loopBB);
         builder->SetInsertPoint(loopBB);
-        for (const auto& stmt : whileStmt->body) {
+
+        for (const unique_ptr<Statement>& stmt : whileStmt->body) {
             generateStatement(stmt.get());
         }
-        builder->CreateBr(condBB);
+
+        if (!builder->GetInsertBlock()->getTerminator()) {
+            builder->CreateBr(condBB);
+        }
+
+        loopExitStack.pop_back();
 
         function->insert(function->end(), afterBB);
         builder->SetInsertPoint(afterBB);

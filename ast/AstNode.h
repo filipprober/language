@@ -307,8 +307,6 @@ public:
     void print(int indent = 0) const override;
 };
 
-
-
 class Variable : public Expression {
 public:
     string name;
@@ -441,26 +439,28 @@ public:
         body(std::move(body)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "FunctionDeclaration(name=" << name;
-
-        cout << ", params=[";
-        for (size_t i = 0; i < parameters.size(); i++) {
-            if (i > 0) cout << ", ";
-            cout << parameters[i].name << ": " << parameters[i].typeStr;
-        }
-        cout << "]";
-
-        if (!returnTypeStr.empty()) {
-            cout << ", returns=" << returnTypeStr;
-        }
-        cout << ")" << endl;
-
-        for (const auto& statement : body) {
-            statement->print(indent + 2);
-        }
-    }
+    void print(int indent = 0) const override;
 };
+
+inline void FunctionDeclaration::print(int indent) const {
+    cout << string(indent, ' ') << "FunctionDeclaration(name=" << name;
+
+    cout << ", params=[";
+    for (size_t i = 0; i < parameters.size(); i++) {
+        if (i > 0) cout << ", ";
+        cout << parameters[i].name << ": " << parameters[i].typeStr;
+    }
+    cout << "]";
+
+    if (!returnTypeStr.empty()) {
+        cout << ", returns=" << returnTypeStr;
+    }
+    cout << ")" << endl;
+
+    for (const auto& statement : body) {
+        statement->print(indent + 2);
+    }
+}
 
 class FunctionCall : public Expression {
 public:
@@ -472,13 +472,15 @@ public:
         arguments(std::move(arguments)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "FunctionCall(" << name << ")" << endl;
-        for (const auto& argument : arguments) {
-            argument->print(indent + 2);
-        }
-    }
+    void print(int indent = 0) const override;
 };
+
+inline void FunctionCall::print(int indent) const {
+    cout << string(indent, ' ') << "FunctionCall(" << name << ")" << endl;
+    for (const auto& argument : arguments) {
+        argument->print(indent + 2);
+    }
+}
 
 class IfStatement : public Statement {
 public:
@@ -495,24 +497,26 @@ public:
         elseBranch(std::move(elseBranch)) {
     }
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "IfStatement" << endl;
-        cout << string(indent + 2, ' ') << "Condition:" << endl;
-        condition->print(indent + 4);
-        cout << string(indent + 2, ' ') << "Then:" << endl;
+    void print(int indent = 0) const override;
+};
 
-        for (const auto& statement: thenBranch) {
+inline void IfStatement::print(int indent) const {
+    cout << string(indent, ' ') << "IfStatement" << endl;
+    cout << string(indent + 2, ' ') << "Condition:" << endl;
+    condition->print(indent + 4);
+    cout << string(indent + 2, ' ') << "Then:" << endl;
+
+    for (const auto& statement: thenBranch) {
+        statement->print(indent + 4);
+    }
+
+    if (!elseBranch.empty()) {
+        cout << string(indent + 2, ' ') << "Else:" << endl;
+        for (const auto& statement: elseBranch) {
             statement->print(indent + 4);
         }
-
-        if (!elseBranch.empty()) {
-            cout << string(indent + 2, ' ') << "Else:" << endl;
-            for (const auto& statement: elseBranch) {
-                statement->print(indent + 4);
-            }
-        }
     }
-};
+}
 
 class WhileStatement : public Statement {
 public:
@@ -525,17 +529,27 @@ public:
     ) : condition(std::move(condition)),
         body(std::move(body)) {}
 
-    void print(int indent = 0) const override {
-        cout << string(indent, ' ') << "WhileStatement" << endl;
-        cout << string(indent + 2, ' ') << "Condition:" << endl;
-        condition->print(indent + 4);
-        cout << string(indent + 2, ' ') << "Body:" << endl;
-
-        for (const auto& statement: body) {
-            statement->print(indent + 4);
-        }
-    }
+    void print(int indent = 0) const override;
 };
+
+class BreakStatement : public Statement
+{
+public:
+    BreakStatement() {}
+
+    void print(int indent = 0) const override;
+};
+
+inline void WhileStatement::print(int indent) const {
+    cout << string(indent, ' ') << "WhileStatement" << endl;
+    cout << string(indent + 2, ' ') << "Condition:" << endl;
+    condition->print(indent + 4);
+    cout << string(indent + 2, ' ') << "Body:" << endl;
+
+    for (const unique_ptr<Statement>& statement: body) {
+        statement->print(indent + 4);
+    }
+}
 
 class PropertyDeclaration
 {
@@ -803,8 +817,8 @@ inline void TraitDeclaration::print(int indent) const {
 }
 
 inline void InterfaceDeclaration::print(int indent) const {
-    cout << string(indent, ' ') << "interface " << name << ":" << endl;
-    for (const auto& method : methods) {
+    cout << string(indent, ' ') << "InterfaceDeclaration(name=" << name << "):" << endl;
+    for (const unique_ptr<MethodDeclaration>& method : methods) {
         method->print(indent + 2);
     }
 }
@@ -838,7 +852,8 @@ inline void ClassDeclaration::print(int indent) const {
 
     // Properties
     if (!properties.empty()) {
-        for (const auto& prop : properties) {
+        cout << string(indent + 2, ' ') << "# Properties:" << endl;
+        for (const PropertyDeclaration& prop : properties) {
             prop.print(indent + 2);
         }
     }
@@ -846,15 +861,15 @@ inline void ClassDeclaration::print(int indent) const {
     // Constructors
     if (!constructors.empty()) {
         cout << string(indent + 2, ' ') << "# Constructors:" << endl;
-        for (const auto& ctor : constructors) {
-            ctor->print(indent + 2);
+        for (const unique_ptr<ConstructorDeclaration>& init : constructors) {
+            init->print(indent + 2);
         }
     }
 
     // Methods
     if (!methods.empty()) {
         cout << string(indent + 2, ' ') << "# Methods:" << endl;
-        for (const auto& method : methods) {
+        for (const unique_ptr<MethodDeclaration>& method : methods) {
             method->print(indent + 2);
         }
     }
@@ -862,12 +877,13 @@ inline void ClassDeclaration::print(int indent) const {
 
 inline void ConstructorDeclaration::print(int indent) const {
     string vis = visibility == Visibility::Public ? "public" : "private";
-    cout << string(indent, ' ') << vis << " init(";
+    cout << string(indent, ' ') << "ConstructorDeclaration(visibility=" << vis;
+    cout << ", params=[";
     for (size_t i = 0; i < parameters.size(); i++) {
         if (i > 0) cout << ", ";
         cout << parameters[i].name << ": " << parameters[i].typeStr;
     }
-    cout << "):" << endl;
+    cout << "]):" << endl;
 
     if (hasSuper) {
         cout << string(indent + 2, ' ') << "super(...)" << endl;
@@ -884,18 +900,13 @@ inline void MethodDeclaration::print(int indent) const {
     cout << string(indent, ' ') << vis << " ";
     if (isStatic) cout << "const ";
     if (isAbstract) cout << "abstract ";
-    cout << "fn " << name << "(";
+    cout << "MethodDeclaration(name=" << name << ", params=[";
 
     for (size_t i = 0; i < parameters.size(); i++) {
         if (i > 0) cout << ", ";
         cout << parameters[i].name << ": " << parameters[i].typeStr;
     }
-    cout << ")";
-
-    if (!returnTypeStr.empty() && returnTypeStr != "void") {
-        cout << " -> " << returnTypeStr;
-    }
-    cout << ":" << endl;
+    cout << "], returns=" << returnTypeStr << "):" << endl;
 
     if (!isAbstract) {
         for (const auto& statement : body) {
@@ -955,6 +966,10 @@ inline void ReturnStatement::print(int indent) const {
 inline void ExpressionStatement::print(int indent) const {
     cout << string(indent, ' ') << "ExpressionStatement" << endl;
     expression->print(indent + 2);
+}
+
+inline void BreakStatement::print(int indent) const {
+    cout << string(indent, ' ') << "BreakStatement" << endl;
 }
 
 // ======================
